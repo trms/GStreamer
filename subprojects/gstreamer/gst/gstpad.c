@@ -4426,6 +4426,12 @@ gst_pad_chain_data_unchecked (GstPad * pad, GstPadProbeType type, void *data)
 
   PROBE_HANDLE (pad, type, data, probe_stopped, probe_handled);
 
+  if (G_UNLIKELY (GST_PAD_IS_FLUSHING (pad)))
+    goto flushing;
+
+  if (G_UNLIKELY (GST_PAD_IS_EOS (pad)))
+    goto eos;
+
   ACQUIRE_PARENT (pad, parent, no_parent);
   GST_OBJECT_UNLOCK (pad);
 
