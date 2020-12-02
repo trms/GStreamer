@@ -59,6 +59,7 @@ base_tests = [
    [['elements/openjpeg.c'], not openjpeg_dep.found(), [openjpeg_dep]],
   [['elements/pcapparse.c'], false, [libparser_dep]],
   [['elements/pnm.c']],
+  [['elements/proxysink.c']],
   [['elements/ristrtpext.c']],
   [['elements/rtponvifparse.c']],
   [['elements/rtponviftimestamp.c']],
