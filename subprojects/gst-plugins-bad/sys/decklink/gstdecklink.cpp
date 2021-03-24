@@ -28,6 +28,7 @@
 #include "gstdecklink.h"
 #include "gstdecklinkaudiosink.h"
 #include "gstdecklinkvideosink.h"
+#include "gstdecklinksink.h"
 #include "gstdecklinkaudiosrc.h"
 #include "gstdecklinkvideosrc.h"
 #include "gstdecklinkdeviceprovider.h"
