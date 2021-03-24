@@ -5,6 +5,7 @@ decklink_sources = [
   'gstdecklinkvideosink.cpp',
   'gstdecklinkaudiosrc.cpp',
   'gstdecklinkvideosrc.cpp',
+  'gstdecklinksink.cpp',
   'gstdecklinkdeviceprovider.cpp',
 ]
 

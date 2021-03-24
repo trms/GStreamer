@@ -30,6 +30,7 @@
 #include "gstdecklinkvideosink.h"
 #include "gstdecklinkaudiosrc.h"
 #include "gstdecklinkvideosrc.h"
+#include "gstdecklinksink.h"
 #include "gstdecklinkdeviceprovider.h"
 
 static gboolean
@@ -39,6 +40,7 @@ plugin_init (GstPlugin * plugin)
   GST_ELEMENT_REGISTER (decklinkvideosink, plugin);
   GST_ELEMENT_REGISTER (decklinkaudiosrc, plugin);
   GST_ELEMENT_REGISTER (decklinkvideosrc, plugin);
+  GST_ELEMENT_REGISTER (decklinksink, plugin);
 
   GST_DEVICE_PROVIDER_REGISTER (decklinkdeviceprovider, plugin);
 
