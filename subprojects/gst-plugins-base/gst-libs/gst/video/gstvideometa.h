@@ -413,6 +413,26 @@ gst_buffer_add_video_time_code_meta_full                     (GstBuffer         
                                                               guint                   frames,
                                                               guint                   field_count);
 
+typedef struct {
+  GstMeta meta;
+
+  GstBuffer *buffer;
+} GstVideoAudioMeta;
+
+GST_VIDEO_API
+GType gst_video_audio_meta_api_get_type (void);
+#define GST_VIDEO_AUDIO_META_API_TYPE (gst_video_audio_meta_api_get_type())
+
+GST_VIDEO_API
+const GstMetaInfo *gst_video_audio_meta_get_info (void);
+#define GST_VIDEO_AUDIO_META_INFO (gst_video_audio_meta_get_info())
+
+#define gst_buffer_get_video_audio_meta(b) \
+        ((GstVideoAudioMeta*)gst_buffer_get_meta((b),GST_VIDEO_AUDIO_META_API_TYPE))
+
+GST_VIDEO_API
+GstVideoAudioMeta *gst_buffer_add_video_audio_meta (GstBuffer * buffer, GstBuffer * audio_buffer);
+
 G_END_DECLS
 
 #endif /* __GST_VIDEO_META_H__ */
