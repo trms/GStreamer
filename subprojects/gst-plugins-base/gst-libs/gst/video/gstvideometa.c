@@ -1206,3 +1206,88 @@ gst_buffer_add_video_time_code_meta_full (GstBuffer * buffer, guint fps_n,
 
   return meta;
 }
+
+GType
+gst_video_audio_meta_api_get_type (void)
+{
+  static volatile GType type;
+
+  if (g_once_init_enter (&type)) {
+    static const gchar *tags[] = { NULL };
+    GType _type = gst_meta_api_type_register ("GstVideoAudioMetaAPI", tags);
+    g_once_init_leave (&type, _type);
+  }
+  return type;
+}
+
+
+static gboolean
+gst_video_audio_meta_transform (GstBuffer * dest, GstMeta * meta,
+    GstBuffer * buffer, GQuark type, gpointer data)
+{
+  GstVideoAudioMeta *dmeta, *smeta;
+
+  if (GST_META_TRANSFORM_IS_COPY (type)) {
+    smeta = (GstVideoAudioMeta *) meta;
+
+    GST_DEBUG ("copy video audio metadata");
+    dmeta = gst_buffer_add_video_audio_meta (dest, smeta->buffer);
+    if (!dmeta)
+      return FALSE;
+  } else {
+    /* return FALSE, if transform type is not supported */
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+gst_video_audio_meta_init (GstMeta * meta, gpointer params, GstBuffer * buffer)
+{
+  GstVideoAudioMeta *emeta = (GstVideoAudioMeta *) meta;
+
+  emeta->buffer = NULL;
+
+  return TRUE;
+}
+
+static void
+gst_video_audio_meta_free (GstMeta * meta, GstBuffer * buffer)
+{
+  GstVideoAudioMeta *emeta = (GstVideoAudioMeta *) meta;
+
+  gst_buffer_replace (&emeta->buffer, NULL);
+}
+
+const GstMetaInfo *
+gst_video_audio_meta_get_info (void)
+{
+  static const GstMetaInfo *meta_info = NULL;
+
+  if (g_once_init_enter ((GstMetaInfo **) & meta_info)) {
+    const GstMetaInfo *mi = gst_meta_register (GST_VIDEO_AUDIO_META_API_TYPE,
+        "GstVideoAudioMeta",
+        sizeof (GstVideoAudioMeta),
+        gst_video_audio_meta_init,
+        gst_video_audio_meta_free,
+        gst_video_audio_meta_transform);
+    g_once_init_leave ((GstMetaInfo **) & meta_info, (GstMetaInfo *) mi);
+  }
+  return meta_info;
+}
+
+GstVideoAudioMeta *
+gst_buffer_add_video_audio_meta (GstBuffer * buffer, GstBuffer * audio_buffer)
+{
+  GstVideoAudioMeta *meta;
+
+  g_return_val_if_fail (buffer != NULL, NULL);
+  g_return_val_if_fail (audio_buffer != NULL, NULL);
+
+  meta = (GstVideoAudioMeta *) gst_buffer_add_meta (buffer,
+      GST_VIDEO_AUDIO_META_INFO, NULL);
+
+  meta->buffer = gst_buffer_ref (audio_buffer);
+
+  return meta;
+}
