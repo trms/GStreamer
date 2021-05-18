@@ -72,7 +72,7 @@ struct _GstDecklinkVideoSrc
 
   GstVideoInfo info;
   GstDecklinkVideoFormat video_format;
-  GstDecklinkProfileId profile_id;
+  BMDDuplexMode duplex_mode;
   BMDTimecodeFormat timecode_format;
 
   GstDecklinkInput *input;

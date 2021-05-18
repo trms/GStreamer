@@ -163,15 +163,11 @@ typedef enum {
 GType gst_decklink_video_format_get_type (void);
 
 typedef enum {
-  GST_DECKLINK_PROFILE_ID_DEFAULT,
-  GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX, /* bmdProfileOneSubDeviceFullDuplex */
-  GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX, /* bmdProfileOneSubDeviceHalfDuplex */
-  GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX, /* bmdProfileTwoSubDevicesFullDuplex */
-  GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_HALF_DUPLEX, /* bmdProfileTwoSubDevicesHalfDuplex */
-  GST_DECKLINK_PROFILE_ID_FOUR_SUB_DEVICES_HALF_DUPLEX, /* bmdProfileFourSubDevicesHalfDuplex */
-} GstDecklinkProfileId;
-#define GST_TYPE_DECKLINK_PROFILE_ID (gst_decklink_profile_id_get_type ())
-GType gst_decklink_profile_id_get_type (void);
+  GST_DECKLINK_DUPLEX_MODE_HALF, /* bmdDuplexModeHalf */
+  GST_DECKLINK_DUPLEX_MODE_FULL, /* bmdDuplexModeFull */
+} GstDecklinkDuplexMode;
+#define GST_TYPE_DECKLINK_DUPLEX_MODE (gst_decklink_duplex_mode_get_type ())
+GType gst_decklink_duplex_mode_get_type (void);
 
 typedef enum {
   GST_DECKLINK_TIMECODE_FORMAT_RP188VITC1, /*bmdTimecodeRP188VITC1 */
@@ -210,8 +206,8 @@ const GstDecklinkVideoFormat gst_decklink_type_from_video_format (GstVideoFormat
 GstVideoFormat gst_decklink_video_format_from_type (BMDPixelFormat pf);
 const BMDTimecodeFormat gst_decklink_timecode_format_from_enum (GstDecklinkTimecodeFormat f);
 const GstDecklinkTimecodeFormat gst_decklink_timecode_format_to_enum (BMDTimecodeFormat f);
-const BMDProfileID gst_decklink_profile_id_from_enum (GstDecklinkProfileId p);
-const GstDecklinkProfileId gst_decklink_profile_id_to_enum (BMDProfileID p);
+const BMDDuplexMode gst_decklink_duplex_mode_from_enum (GstDecklinkDuplexMode m);
+const GstDecklinkDuplexMode gst_decklink_duplex_mode_to_enum (BMDDuplexMode m);
 const BMDKeyerMode gst_decklink_keyer_mode_from_enum (GstDecklinkKeyerMode m);
 const GstDecklinkKeyerMode gst_decklink_keyer_mode_to_enum (BMDKeyerMode m);
 
@@ -239,7 +235,7 @@ typedef struct _GstDecklinkOutput GstDecklinkOutput;
 struct _GstDecklinkOutput {
   IDeckLink *device;
   IDeckLinkOutput *output;
-  IDeckLinkProfileAttributes *attributes;
+  IDeckLinkAttributes *attributes;
   IDeckLinkKeyer *keyer;
 
   gchar *hw_serial_number;
@@ -270,7 +266,7 @@ struct _GstDecklinkInput {
   IDeckLink *device;
   IDeckLinkInput *input;
   IDeckLinkConfiguration *config;
-  IDeckLinkProfileAttributes *attributes;
+  IDeckLinkAttributes *attributes;
 
   gchar *hw_serial_number;
 
