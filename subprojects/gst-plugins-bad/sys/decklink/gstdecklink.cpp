@@ -1722,7 +1722,7 @@ gst_decklink_acquire_nth_output (gint n, GstElement * sink, gboolean is_audio)
   if (!is_audio) {
     GstDecklinkVideoSink *videosink = (GstDecklinkVideoSink *) (sink);
     if (gst_decklink_configure_duplex_mode (device,
-            videosink->duplex_mode) == DUPLEX_MODE_SET_FAILURE) {
+            bmdDuplexModeHalf) == DUPLEX_MODE_SET_FAILURE) {
       return NULL;
     }
   }
