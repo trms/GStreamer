@@ -52,6 +52,7 @@ struct _GstCCExtractor
   GstFlowCombiner *combiner;
 
   gboolean remove_caption_meta;
+  gboolean force_expose_caption_pad;
 };
 
 struct _GstCCExtractorClass
