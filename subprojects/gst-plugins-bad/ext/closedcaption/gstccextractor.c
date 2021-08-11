@@ -45,7 +45,10 @@ enum
 {
   PROP_0,
   PROP_REMOVE_CAPTION_META,
+  PROP_FORCE_EXPOSE_CAPTION_PAD,
 };
+
+#define DEFAULT_FORCE_EXPOSE_CAPTION_PAD FALSE
 
 static GstStaticPadTemplate sinktemplate = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
@@ -111,6 +114,23 @@ gst_cc_extractor_class_init (GstCCExtractorClass * klass)
           "Remove Caption Meta",
           "Remove caption meta from outgoing video buffers", FALSE,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstCCExtractor:force-expose-caption-pad
+   *
+   * Exposes caption pad on the first buffer even if caption meta is not
+   * attached on the buffer. When this mode is used, user should configure
+   * ccconverter element so that downstream can handle any caption type update.
+   *
+   * Since: 1.22
+   */
+  g_object_class_install_property (gobject_class, PROP_FORCE_EXPOSE_CAPTION_PAD,
+      g_param_spec_boolean ("force-expose-caption-pad",
+          "Force expose caption pad",
+          "Force expose caption pad on the first buffer",
+          DEFAULT_FORCE_EXPOSE_CAPTION_PAD,
+          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
+          G_PARAM_STATIC_STRINGS));
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_cc_extractor_change_state);
@@ -340,15 +360,9 @@ forward_sticky_events (GstPad * pad, GstEvent ** event, gpointer user_data)
 }
 
 static GstFlowReturn
-gst_cc_extractor_handle_meta (GstCCExtractor * filter, GstBuffer * buf,
-    GstVideoCaptionMeta * meta, GstVideoTimeCodeMeta * tc_meta)
+gst_cc_extractor_ensure_caption_pad (GstCCExtractor * filter,
+    GstVideoCaptionType caption_type)
 {
-  GstBuffer *outbuf = NULL;
-  GstFlowReturn flow;
-
-  GST_DEBUG_OBJECT (filter, "Handling meta");
-
-  /* Check if the meta type matches the configured one */
   if (filter->captionpad == NULL) {
     GST_DEBUG_OBJECT (filter, "Creating new caption pad");
 
@@ -359,24 +373,55 @@ gst_cc_extractor_handle_meta (GstCCExtractor * filter, GstBuffer * buf,
         GST_DEBUG_FUNCPTR (gst_cc_extractor_iterate_internal_links));
     gst_pad_set_active (filter->captionpad, TRUE);
 
-    filter->caption_type = meta->caption_type;
+    /* When force_expose_caption_pad == TRUE */
+    if (caption_type == GST_VIDEO_CAPTION_TYPE_UNKNOWN) {
+      GstCaps *caps = NULL;
 
-    gst_pad_sticky_events_foreach (filter->sinkpad, forward_sticky_events,
-        filter);
+      /* caption type is unknow at this moment. Adds caption pad first and
+       * picks one caption type supported by downstream (if it's linked) */
+      gst_element_add_pad (GST_ELEMENT (filter), filter->captionpad);
+      gst_flow_combiner_add_pad (filter->combiner, filter->captionpad);
 
-    if (!gst_pad_has_current_caps (filter->captionpad)) {
-      GST_ERROR_OBJECT (filter, "Unknown/invalid caption type");
-      return GST_FLOW_NOT_NEGOTIATED;
+      /* caption pad may be linked on pad-added signal, then query downstream */
+      caps = gst_pad_get_allowed_caps (filter->captionpad);
+      if (!caps || gst_caps_is_any (caps)) {
+        gst_clear_caps (&caps);
+        caps = gst_pad_get_pad_template_caps (filter->captionpad);
+      }
+
+      caps = gst_caps_fixate (caps);
+      caption_type = gst_video_caption_type_from_caps (caps);
+      gst_caps_unref (caps);
+
+      if (caption_type == GST_VIDEO_CAPTION_TYPE_UNKNOWN) {
+        GST_ERROR_OBJECT (filter, "Failed to determine CC type");
+        return GST_FLOW_NOT_NEGOTIATED;
+      }
+
+      filter->caption_type = caption_type;
+
+      gst_pad_sticky_events_foreach (filter->sinkpad, forward_sticky_events,
+          filter);
+    } else {
+      filter->caption_type = caption_type;
+
+      gst_pad_sticky_events_foreach (filter->sinkpad, forward_sticky_events,
+          filter);
+
+      if (!gst_pad_has_current_caps (filter->captionpad)) {
+        GST_ERROR_OBJECT (filter, "Unknown/invalid caption type");
+        return GST_FLOW_NOT_NEGOTIATED;
+      }
+
+      gst_element_add_pad (GST_ELEMENT (filter), filter->captionpad);
+      gst_flow_combiner_add_pad (filter->combiner, filter->captionpad);
     }
-
-    gst_element_add_pad (GST_ELEMENT (filter), filter->captionpad);
-    gst_flow_combiner_add_pad (filter->combiner, filter->captionpad);
-  } else if (meta->caption_type != filter->caption_type) {
+  } else if (caption_type != filter->caption_type) {
     GstCaps *caption_caps =
-        create_caps_from_caption_type (meta->caption_type, &filter->video_info);
+        create_caps_from_caption_type (caption_type, &filter->video_info);
 
     GST_DEBUG_OBJECT (filter, "Caption type changed from %d to %d",
-        filter->caption_type, meta->caption_type);
+        filter->caption_type, caption_type);
     if (caption_caps == NULL) {
       GST_ERROR_OBJECT (filter, "Unknown/invalid caption type");
       return GST_FLOW_NOT_NEGOTIATED;
@@ -385,8 +430,24 @@ gst_cc_extractor_handle_meta (GstCCExtractor * filter, GstBuffer * buf,
     gst_pad_push_event (filter->captionpad, gst_event_new_caps (caption_caps));
     gst_caps_unref (caption_caps);
 
-    filter->caption_type = meta->caption_type;
+    filter->caption_type = caption_type;
   }
+
+  return GST_FLOW_OK;
+}
+
+static GstFlowReturn
+gst_cc_extractor_handle_meta (GstCCExtractor * filter, GstBuffer * buf,
+    GstVideoCaptionMeta * meta, GstVideoTimeCodeMeta * tc_meta)
+{
+  GstBuffer *outbuf = NULL;
+  GstFlowReturn flow;
+
+  GST_DEBUG_OBJECT (filter, "Handling meta");
+
+  flow = gst_cc_extractor_ensure_caption_pad (filter, meta->caption_type);
+  if (flow != GST_FLOW_OK)
+    return flow;
 
   GST_DEBUG_OBJECT (filter,
       "Creating new buffer of size %" G_GSIZE_FORMAT " bytes", meta->size);
@@ -427,6 +488,9 @@ gst_cc_extractor_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
   GstVideoTimeCodeMeta *tc_meta;
   gboolean had_cc_meta = FALSE;
   gpointer iter = NULL;
+
+  if (filter->force_expose_caption_pad)
+    flow = gst_cc_extractor_ensure_caption_pad (filter, filter->caption_type);
 
   tc_meta = gst_buffer_get_video_time_code_meta (buf);
 
@@ -513,6 +577,9 @@ gst_cc_extractor_set_property (GObject * object, guint prop_id,
     case PROP_REMOVE_CAPTION_META:
       filter->remove_caption_meta = g_value_get_boolean (value);
       break;
+    case PROP_FORCE_EXPOSE_CAPTION_PAD:
+      filter->force_expose_caption_pad = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -528,6 +595,9 @@ gst_cc_extractor_get_property (GObject * object, guint prop_id, GValue * value,
   switch (prop_id) {
     case PROP_REMOVE_CAPTION_META:
       g_value_set_boolean (value, filter->remove_caption_meta);
+      break;
+    case PROP_FORCE_EXPOSE_CAPTION_PAD:
+      g_value_set_boolean (value, filter->force_expose_caption_pad);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
