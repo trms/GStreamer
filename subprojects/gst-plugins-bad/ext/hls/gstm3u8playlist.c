@@ -71,6 +71,13 @@ gst_m3u8_entry_free (GstM3U8Entry * entry)
 GstM3U8Playlist *
 gst_m3u8_playlist_new (guint version, guint window_size)
 {
+  return gst_m3u8_playlist_new_full (version, window_size, NULL);
+}
+
+GstM3U8Playlist *
+gst_m3u8_playlist_new_full (guint version, guint window_size,
+    const gchar * duration_format)
+{
   GstM3U8Playlist *playlist;
 
   playlist = g_new0 (GstM3U8Playlist, 1);
@@ -79,6 +86,13 @@ gst_m3u8_playlist_new (guint version, guint window_size)
   playlist->type = GST_M3U8_PLAYLIST_TYPE_EVENT;
   playlist->end_list = FALSE;
   playlist->entries = g_queue_new ();
+
+  if (duration_format) {
+    playlist->duration_format = g_strdup (duration_format);
+  } else {
+    /* The same as g_ascii_dtostr() */
+    playlist->duration_format = g_strdup ("%.17g");
+  }
 
   return playlist;
 }
@@ -90,6 +104,7 @@ gst_m3u8_playlist_free (GstM3U8Playlist * playlist)
 
   g_queue_foreach (playlist->entries, (GFunc) gst_m3u8_entry_free, NULL);
   g_queue_free (playlist->entries);
+  g_free (playlist->duration_format);
   g_free (playlist);
 }
 
@@ -175,8 +190,8 @@ gst_m3u8_playlist_render (GstM3U8Playlist * playlist)
           entry->title ? entry->title : "");
     } else {
       g_string_append_printf (playlist_str, "#EXTINF:%s,%s\n",
-          g_ascii_dtostr (buf, sizeof (buf), entry->duration / GST_SECOND),
-          entry->title ? entry->title : "");
+          g_ascii_formatd (buf, sizeof (buf), playlist->duration_format,
+              entry->duration / GST_SECOND), entry->title ? entry->title : "");
     }
 
     g_string_append_printf (playlist_str, "%s\n", entry->url);
