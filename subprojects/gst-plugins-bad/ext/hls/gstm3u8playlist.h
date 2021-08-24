@@ -35,6 +35,7 @@ struct _GstM3U8Playlist
   gint type;
   gboolean end_list;
   guint sequence_number;
+  gchar *duration_format;
 
   /*< Private >*/
   GQueue *entries;
@@ -50,6 +51,10 @@ typedef enum
 
 GstM3U8Playlist * gst_m3u8_playlist_new (guint version,
 				         guint window_size);
+
+GstM3U8Playlist * gst_m3u8_playlist_new_full (guint version,
+                                              guint window_size,
+                                              const gchar * duration_format);
 
 void              gst_m3u8_playlist_free (GstM3U8Playlist * playlist);
 
