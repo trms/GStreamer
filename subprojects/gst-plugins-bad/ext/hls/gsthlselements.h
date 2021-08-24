@@ -10,6 +10,7 @@ void hls_element_init (GstPlugin * plugin);
 GST_ELEMENT_REGISTER_DECLARE (hlsdemux);
 GST_ELEMENT_REGISTER_DECLARE (hlssink);
 GST_ELEMENT_REGISTER_DECLARE (hlssink2);
+GST_ELEMENT_REGISTER_DECLARE (hlswebvttsink);
 
 GST_DEBUG_CATEGORY_EXTERN (hls_debug);
 
