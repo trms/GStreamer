@@ -5,6 +5,7 @@ hls_sources = [
   'gsthlsplugin.c',
   'gsthlssink.c',
   'gsthlssink2.c',
+  'gsthlswebvttsink.c',
   'gstm3u8playlist.c',
   'm3u8.c',
 ]
