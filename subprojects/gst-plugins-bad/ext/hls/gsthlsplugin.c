@@ -14,6 +14,7 @@ plugin_init (GstPlugin * plugin)
   ret |= GST_ELEMENT_REGISTER (hlsdemux, plugin);
   ret |= GST_ELEMENT_REGISTER (hlssink, plugin);
   ret |= GST_ELEMENT_REGISTER (hlssink2, plugin);
+  ret |= GST_ELEMENT_REGISTER (hlswebvttsink, plugin);
   return ret;
 }
 
