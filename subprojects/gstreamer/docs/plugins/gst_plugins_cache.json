@@ -971,6 +971,20 @@
                     }
                 },
                 "properties": {
+                    "buffer-size": {
+                        "blurb": "Size of the buffer passed to setvbuf(). If a non-zero value is set, it will be rounded down to the nearest multiple of 2.",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "0",
+                        "max": "2147483647",
+                        "min": "0",
+                        "mutable": "ready",
+                        "readable": true,
+                        "type": "guint",
+                        "writable": true
+                    },
                     "location": {
                         "blurb": "Location of the file to read",
                         "conditionally-available": false,
