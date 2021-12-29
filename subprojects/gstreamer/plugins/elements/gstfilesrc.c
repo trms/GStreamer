@@ -113,11 +113,13 @@ enum
 };
 
 #define DEFAULT_BLOCKSIZE       4*1024
+#define DEFAULT_BUFFER_SIZE     0
 
 enum
 {
   PROP_0,
-  PROP_LOCATION
+  PROP_LOCATION,
+  PROP_BUFFER_SIZE,
 };
 
 static void gst_file_src_finalize (GObject * object);
@@ -166,6 +168,24 @@ gst_file_src_class_init (GstFileSrcClass * klass)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
           GST_PARAM_MUTABLE_READY));
 
+  /**
+   * GstFileSrc:buffer-size:
+   *
+   * Size of the buffer passed to setvbuf POSIX function. Depending on system,
+   * or read pattern (e.g., sequencial or randon-access), larger buffer size can
+   * improve throughput or reduce file access overhead.
+   *
+   * Since: 1.22
+   */
+  g_object_class_install_property (gobject_class, PROP_BUFFER_SIZE,
+      g_param_spec_uint ("buffer-size", "Buffer Size",
+          "Size of the buffer passed to setvbuf(). If a non-zero value is set, "
+          "it will be rounded down to the nearest multiple of 2.",
+          /* NOTE: allowed max size on Windows is INT_MAX */
+          0, G_MAXINT32, DEFAULT_BUFFER_SIZE,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+          GST_PARAM_MUTABLE_READY));
+
   gobject_class->finalize = gst_file_src_finalize;
 
   gst_element_class_set_static_metadata (gstelement_class,
@@ -190,6 +210,8 @@ gst_file_src_class_init (GstFileSrcClass * klass)
 static void
 gst_file_src_init (GstFileSrc * src)
 {
+  src->buffer_size = DEFAULT_BUFFER_SIZE;
+
   gst_base_src_set_blocksize (GST_BASE_SRC (src), DEFAULT_BLOCKSIZE);
 }
 
@@ -200,6 +222,7 @@ gst_file_src_finalize (GObject * object)
 
   src = GST_FILE_SRC (object);
 
+  g_free (src->buffer);
   g_free (src->filename);
   g_free (src->uri);
 
@@ -267,6 +290,11 @@ gst_file_src_set_property (GObject * object, guint prop_id,
     case PROP_LOCATION:
       gst_file_src_set_location (src, g_value_get_string (value), NULL);
       break;
+    case PROP_BUFFER_SIZE:
+      src->buffer_size = g_value_get_uint (value);
+      if (src->buffer_size > 0)
+        src->buffer_size = GST_ROUND_DOWN_2 (src->buffer_size);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -286,6 +314,9 @@ gst_file_src_get_property (GObject * object, guint prop_id, GValue * value,
   switch (prop_id) {
     case PROP_LOCATION:
       g_value_set_string (value, src->filename);
+      break;
+    case PROP_BUFFER_SIZE:
+      g_value_set_uint (value, src->buffer_size);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -531,6 +562,14 @@ gst_file_src_start (GstBaseSrc * basesrc)
 
   gst_base_src_set_dynamic_size (basesrc, src->seekable);
 
+  if (src->buffer_size) {
+    src->buffer = g_malloc (src->buffer_size);
+    if (setvbuf (src->fp, (char *) src->buffer, _IOFBF, src->buffer_size) != 0) {
+      GST_WARNING_OBJECT (src, "setvbuf() failed");
+      g_clear_pointer (&src->buffer, g_free);
+    }
+  }
+
   return TRUE;
 
   /* ERROR */
@@ -595,6 +634,7 @@ gst_file_src_stop (GstBaseSrc * basesrc)
   GstFileSrc *src = GST_FILE_SRC (basesrc);
 
   g_clear_pointer (&src->fp, fclose);
+  g_clear_pointer (&src->buffer, g_free);
 
   src->is_regular = FALSE;
 
