@@ -132,9 +132,6 @@ gst_av_combiner_aggregate (GstAggregator * aggregator, gboolean timeout)
     gst_caps_unref (caps);
   }
 
-  GST_AGGREGATOR_PAD (aggregator->srcpad)->segment.position =
-      GST_BUFFER_PTS (video_buffer);
-
   return gst_aggregator_finish_buffer (GST_AGGREGATOR_CAST (self),
       video_buffer);
 }
