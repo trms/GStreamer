@@ -908,7 +908,14 @@ write_cea608 (GstCCConverter * self, gboolean pad_cea608,
     wrote_first = TRUE;
   }
 
+#if 0
   g_assert_cmpint (out_i / 3, <=, out_fps_entry->max_cea608_count);
+#endif
+  if (out_i / 3 > out_fps_entry->max_cea608_count) {
+    GST_WARNING_OBJECT (self, "Unexpected out_i %d, max_cea608_count %d",
+        out_i, out_fps_entry->max_cea608_count);
+    out_i = out_fps_entry->max_cea608_count * 3;
+  }
 
   *out_size = out_i;
   if (is_last_cea608_field1)
