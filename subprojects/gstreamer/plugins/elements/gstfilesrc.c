@@ -113,7 +113,7 @@ enum
 };
 
 #define DEFAULT_BLOCKSIZE       4*1024
-#define DEFAULT_BUFFER_SIZE     0
+#define DEFAULT_BUFFER_SIZE     10*1024
 
 enum
 {
