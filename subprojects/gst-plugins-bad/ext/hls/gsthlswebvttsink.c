@@ -55,6 +55,7 @@ enum
   PROP_TARGET_DURATION,
   PROP_PLAYLIST_LENGTH,
   PROP_MPEGTS_TIME_OFFSET,
+  PROP_RENDER_TIMESTAMP_MAP,
 };
 
 enum
@@ -74,6 +75,7 @@ static guint signals[SIGNAL_LAST];
 #define DEFAULT_TARGET_DURATION 15
 #define DEFAULT_PLAYLIST_LENGTH 5
 #define DEFAULT_TIMESTAMP_MAP_MPEGTS 324000000
+#define DEFAULT_RENDER_TIMESTAMP_MAP TRUE
 
 #define GST_M3U8_PLAYLIST_VERSION 3
 
@@ -89,11 +91,13 @@ struct _GstHlsWebvttSink
 
   guint index;
   GstClockTime last_running_time;
+  GstClockTime running_time;
   gint max_files;
   gint target_duration;
   GstClockTime target_duration_ns;
   guint64 mpegts_time_offset;
   gchar *timestamp_map;
+  gboolean render_timestamp_map;
 
   GOutputStream *fragment_stream;
   GCancellable *cancellable;
@@ -196,6 +200,12 @@ gst_hls_webvtt_sink_class_init (GstHlsWebvttSinkClass * klass)
           0, G_MAXUINT64, DEFAULT_TIMESTAMP_MAP_MPEGTS,
           G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
           G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_RENDER_TIMESTAMP_MAP,
+      g_param_spec_boolean ("render-timestamp-map", "Render timestamp map",
+          "Render X-TIMESTAMP-MAP tag to WebVTT segments",
+          DEFAULT_RENDER_TIMESTAMP_MAP,
+          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
+          G_PARAM_STATIC_STRINGS));
 
   signals[SIGNAL_GET_PLAYLIST_STREAM] =
       g_signal_new_class_handler ("get-playlist-stream",
@@ -241,6 +251,7 @@ gst_hls_webvtt_sink_init (GstHlsWebvttSink * self)
   self->target_duration = DEFAULT_TARGET_DURATION;
   self->target_duration_ns = DEFAULT_TARGET_DURATION * GST_SECOND;
   self->mpegts_time_offset = DEFAULT_TIMESTAMP_MAP_MPEGTS;
+  self->render_timestamp_map = DEFAULT_RENDER_TIMESTAMP_MAP;
 
   self->cancellable = g_cancellable_new ();
 
@@ -299,6 +310,9 @@ gst_hls_webvtt_sink_set_property (GObject * object, guint prop_id,
     case PROP_MPEGTS_TIME_OFFSET:
       self->mpegts_time_offset = g_value_get_uint64 (value);
       break;
+    case PROP_RENDER_TIMESTAMP_MAP:
+      self->render_timestamp_map = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -332,6 +346,9 @@ gst_hls_webvtt_sink_get_property (GObject * object, guint prop_id,
       break;
     case PROP_MPEGTS_TIME_OFFSET:
       g_value_set_uint64 (value, self->mpegts_time_offset);
+      break;
+    case PROP_RENDER_TIMESTAMP_MAP:
+      g_value_set_boolean (value, self->render_timestamp_map);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -392,6 +409,7 @@ gst_hls_webvtt_sink_start (GstBaseSink * sink)
 
   self->index = 0;
   self->last_running_time = GST_CLOCK_TIME_NONE;
+  self->running_time = GST_CLOCK_TIME_NONE;
 
   g_clear_pointer (&self->playlist, gst_m3u8_playlist_free);
   g_clear_pointer (&self->timestamp_map, g_free);
@@ -446,12 +464,29 @@ gst_hls_webvtt_sink_write_playlist (GstHlsWebvttSink * self)
   g_object_unref (stream);
 }
 
-static gboolean
-gst_hls_webvtt_sink_stop (GstBaseSink * sink)
+static void
+gst_hls_webvtt_sink_drain (GstHlsWebvttSink * self)
 {
-  GstHlsWebvttSink *self = GST_HLS_WEBVTT_SINK (sink);
+  if (self->fragment_stream && self->current_location &&
+      GST_CLOCK_TIME_IS_VALID (self->running_time) &&
+      GST_CLOCK_TIME_IS_VALID (self->last_running_time) &&
+      self->running_time > self->last_running_time) {
+    gchar *entry_location;
+    GstClockTime duration;
 
-  g_clear_object (&self->fragment_stream);
+    if (!self->playlist_root) {
+      entry_location = g_path_get_basename (self->current_location);
+    } else {
+      gchar *name = g_path_get_basename (self->current_location);
+      entry_location = g_build_filename (self->playlist_root, name, NULL);
+      g_free (name);
+    }
+
+    duration = self->running_time - self->last_running_time;
+    gst_m3u8_playlist_add_entry (self->playlist, entry_location,
+        NULL, duration, self->index, FALSE);
+    g_free (entry_location);
+  }
 
   if (self->playlist && (self->state & GST_M3U8_PLAYLIST_RENDER_STARTED) &&
       !(self->state & GST_M3U8_PLAYLIST_RENDER_ENDED)) {
@@ -459,8 +494,16 @@ gst_hls_webvtt_sink_stop (GstBaseSink * sink)
     gst_hls_webvtt_sink_write_playlist (self);
   }
 
-  g_clear_pointer (&self->playlist, gst_m3u8_playlist_free);
-  g_clear_pointer (&self->timestamp_map, g_free);
+  g_clear_object (&self->fragment_stream);
+  g_clear_pointer (&self->current_location, g_free);
+}
+
+static gboolean
+gst_hls_webvtt_sink_stop (GstBaseSink * sink)
+{
+  GstHlsWebvttSink *self = GST_HLS_WEBVTT_SINK (sink);
+
+  gst_hls_webvtt_sink_drain (self);
 
   return TRUE;
 }
@@ -508,9 +551,7 @@ gst_hls_webvtt_sink_event (GstBaseSink * sink, GstEvent * event)
     }
     case GST_EVENT_EOS:
     {
-      self->playlist->end_list = TRUE;
-      gst_hls_webvtt_sink_write_playlist (self);
-      self->state |= GST_M3U8_PLAYLIST_RENDER_ENDED;
+      gst_hls_webvtt_sink_drain (self);
       break;
     }
     default:
@@ -539,7 +580,7 @@ schedule_next_key_unit (GstHlsWebvttSink * self)
       TRUE, self->index + 1);
 
   if (!gst_pad_push_event (GST_BASE_SINK_PAD (self), event)) {
-    GST_ERROR_OBJECT (self, "Failed to push upstream force key unit event");
+    GST_WARNING_OBJECT (self, "Failed to push upstream force key unit event");
     return FALSE;
   }
 
@@ -586,7 +627,7 @@ gst_hls_webvtt_sink_insert_timestamp_map (GstHlsWebvttSink * self,
   GString *str = NULL;
   gsize len;
 
-  if (!self->timestamp_map) {
+  if (!self->timestamp_map && self->render_timestamp_map) {
     GString *s = g_string_new ("X-TIMESTAMP-MAP=MPEGTS:");
     guint64 running_time_in_mpegts;
 
@@ -653,14 +694,18 @@ gst_hls_webvtt_sink_insert_timestamp_map (GstHlsWebvttSink * self,
   }
   gst_buffer_unmap (buf, &map);
 
-  if (!next_line_pos) {
-    GST_WARNING_OBJECT (self, "Failed to find WebVTT line terminator");
-    g_string_append_c (str, '\n');
-    g_string_append (str, self->timestamp_map);
-    g_string_append_c (str, '\n');
+  if (self->render_timestamp_map) {
+    if (!next_line_pos) {
+      GST_WARNING_OBJECT (self, "Failed to find WebVTT line terminator");
+      g_string_append_c (str, '\n');
+      g_string_append (str, self->timestamp_map);
+      g_string_append_c (str, '\n');
+    } else {
+      g_string_insert_len (str, next_line_pos, self->timestamp_map, -1);
+      g_string_insert_c (str, next_line_pos + strlen (self->timestamp_map), '\n');
+    }
   } else {
-    g_string_insert_len (str, next_line_pos, self->timestamp_map, -1);
-    g_string_insert_c (str, next_line_pos + strlen (self->timestamp_map), '\n');
+    g_string_append_c (str, '\n');
   }
 
 out:
@@ -812,6 +857,7 @@ gst_hls_webvtt_sink_render (GstBaseSink * sink, GstBuffer * buf)
   GError *err = NULL;
   GstFlowReturn ret = GST_FLOW_OK;
   GstBuffer *render_buf;
+  GstClockTime running_time;
 
   if (!GST_BUFFER_PTS_IS_VALID (buf)) {
     GST_ERROR_OBJECT (self, "Invalid timestamp");
@@ -821,13 +867,11 @@ gst_hls_webvtt_sink_render (GstBaseSink * sink, GstBuffer * buf)
 
   render_buf = gst_buffer_ref (buf);
 
+  running_time = gst_segment_to_running_time (&sink->segment,
+      GST_FORMAT_TIME, GST_BUFFER_PTS (render_buf));
+
   if (GST_BUFFER_FLAG_IS_SET (render_buf, GST_BUFFER_FLAG_HEADER) ||
       !GST_BUFFER_FLAG_IS_SET (render_buf, GST_BUFFER_FLAG_DELTA_UNIT)) {
-    GstClockTime running_time;
-
-    running_time = gst_segment_to_running_time (&sink->segment,
-        GST_FORMAT_TIME, GST_BUFFER_PTS (render_buf));
-
     render_buf = gst_hls_webvtt_sink_insert_timestamp_map (self,
         render_buf, running_time);
 
@@ -855,6 +899,11 @@ gst_hls_webvtt_sink_render (GstBaseSink * sink, GstBuffer * buf)
 
     g_clear_object (&self->fragment_stream);
     self->fragment_stream = get_fragment_stream (self, self->index);
+  } else {
+    if (GST_CLOCK_TIME_IS_VALID (GST_BUFFER_DURATION (render_buf)))
+      running_time += GST_BUFFER_DURATION (render_buf);
+
+    self->running_time = running_time;
   }
 
   if (!self->fragment_stream) {
