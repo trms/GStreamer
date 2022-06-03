@@ -423,7 +423,7 @@ drop_ccp_from_cc_data (guint8 * cc_data, guint cc_data_len)
   return cc_data_extract_cea608 (cc_data, cc_data_len, NULL, NULL, NULL, NULL);
 }
 
-#define DEFAULT_MAX_BUFFER_TIME (100 * GST_MSECOND)
+#define DEFAULT_MAX_BUFFER_TIME (10000 * GST_MSECOND)
 
 struct _CCBuffer
 {
