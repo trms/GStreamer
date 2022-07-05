@@ -51,6 +51,13 @@ GType gst_h264_parse_get_type (void);
 typedef struct _GstH264Parse GstH264Parse;
 typedef struct _GstH264ParseClass GstH264ParseClass;
 
+typedef enum
+{
+  GST_H264_PARSE_FRAMERATE_OVERRIDE_NONE,
+  GST_H264_PARSE_FRAMERATE_OVERRIDE_PARSED,
+  GST_H264_PARSE_FRAMERATE_OVERRIDE_FIXED,
+} GstH264ParseFramerateOverrideMode;
+
 struct _GstH264Parse
 {
   GstBaseParse baseparse;
@@ -147,6 +154,7 @@ struct _GstH264Parse
   /* props */
   gint interval;
   gboolean update_timecode;
+  GstH264ParseFramerateOverrideMode framerate_override_mode;
 
   GstClockTime pending_key_unit_ts;
   GstEvent *force_key_unit_event;

@@ -39,12 +39,14 @@ GST_DEBUG_CATEGORY (h264_parse_debug);
 
 #define DEFAULT_CONFIG_INTERVAL      (0)
 #define DEFAULT_UPDATE_TIMECODE       FALSE
+#define DEFAULT_OVERRIDE_FRAMERATE    GST_H264_PARSE_FRAMERATE_OVERRIDE_NONE
 
 enum
 {
   PROP_0,
   PROP_CONFIG_INTERVAL,
   PROP_UPDATE_TIMECODE,
+  PROP_FRAMERATE_OVERRIDE_MODE,
 };
 
 enum
@@ -81,6 +83,45 @@ enum
   GST_H264_PARSE_SEI_ACTIVE = 1,
   GST_H264_PARSE_SEI_PARSED = 2,
 };
+
+/**
+ * GstH264ParseFramerateOverrideMode:
+ * @GST_H264_PARSE_FRAMERATE_OVERRIDE_NONE: Don't override upstream framerate
+ * @GST_H264_PARSE_FRAMERATE_OVERRIDE_PARSED: Override upstream framerate
+ *     if timing_info_present_flag is present in VUI
+ * @GST_H264_PARSE_FRAMERATE_OVERRIDE_FIXED: Override upstream framerate
+ *     if timing_info_present_flag and fixed_frame_rate_flag are present
+ *     in VUI
+ *
+ * Since: 1.22
+ */
+#define GST_TYPE_H264_PARSE_FRAMERATE_OVERRIDE_MODE (gst_h264_parse_framerate_override_mode_get_type())
+static GType
+gst_h264_parse_framerate_override_mode_get_type (void)
+{
+  static GType override_type = 0;
+
+  if (g_once_init_enter (&override_type)) {
+    static const GEnumValue override_types[] = {
+      {GST_H264_PARSE_FRAMERATE_OVERRIDE_NONE,
+          "Don't override upstream framerate if framerate value is "
+            "specified in upstream caps", "none"},
+      {GST_H264_PARSE_FRAMERATE_OVERRIDE_PARSED,
+          "Override upstream framerate if timing_info_present_flag "
+            "in VUI has non-zero value", "parsed"},
+      {GST_H264_PARSE_FRAMERATE_OVERRIDE_FIXED,
+          "Override upstream framerate if both "
+            "timing_info_present_flag and fixed_frame_rate_flag in VUI have "
+            "non-zero value", "fixed"},
+      {0, NULL, NULL},
+    };
+    GType tmp = g_enum_register_static ("GstH264ParseFramerateOverrideMode",
+        override_types);
+    g_once_init_leave (&override_type, tmp);
+  }
+
+  return override_type;
+}
 
 #define GST_H264_PARSE_STATE_VALID(parse, expected_state) \
   (((parse)->state & (expected_state)) == (expected_state))
@@ -173,6 +214,35 @@ gst_h264_parse_class_init (GstH264ParseClass * klass)
           "VUI and pic_struct_present_flag of VUI must be non-zero",
           DEFAULT_UPDATE_TIMECODE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * GstH264Parse:framerate-override-mode:
+   *
+   * Specifies framerate override mode to use. If selected mode is not "none",
+   * and framerate information is available in bitstream, element will override
+   * upstream framerate with parsed value and it will be used for output caps.
+   *
+   * Recommended use cases:
+   * - "parsed": Use this mode in case that upstream framerate is expected to be
+   *   unreliable but framerate writtin in bitstream can be preferred,
+   *   specifically when an user already knows that timecode and/or closed
+   *   caption data is placed in the bitstream and therefore framerate
+   *   information of H.264 bitstream layer is expected to be more precise.
+   * - "fixed": Use this mode in case that "parsed" is preferred but an user
+   *   wants to accept framerate information written in H.264 bitstream only if
+   *   fixed_frame_rate_flag is equal to one (which implies framerate should be
+   *   constant), but doesn't want fixed_frame_rate_flag is equal to zero
+   *   (framerate can be varying).
+   * Otherwise, "none" (it's default) is strongly recommended.
+   *
+   * Since: 1.22
+   */
+  g_object_class_install_property (gobject_class, PROP_FRAMERATE_OVERRIDE_MODE,
+      g_param_spec_enum ("framerate-override-mode", "Framerate Override Mode",
+          "Upstream framerate override mode to use",
+          GST_TYPE_H264_PARSE_FRAMERATE_OVERRIDE_MODE,
+          DEFAULT_OVERRIDE_FRAMERATE,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   /* Override BaseParse vfuncs */
   parse_class->start = GST_DEBUG_FUNCPTR (gst_h264_parse_start);
   parse_class->stop = GST_DEBUG_FUNCPTR (gst_h264_parse_stop);
@@ -191,6 +261,8 @@ gst_h264_parse_class_init (GstH264ParseClass * klass)
       "Codec/Parser/Converter/Video",
       "Parses H.264 streams",
       "Mark Nauwelaerts <mark.nauwelaerts@collabora.co.uk>");
+
+  gst_type_mark_as_plugin_api (GST_TYPE_H264_PARSE_FRAMERATE_OVERRIDE_MODE, 0);
 }
 
 static void
@@ -205,6 +277,7 @@ gst_h264_parse_init (GstH264Parse * h264parse)
   h264parse->aud_needed = TRUE;
   h264parse->aud_insert = TRUE;
   h264parse->update_timecode = DEFAULT_UPDATE_TIMECODE;
+  h264parse->framerate_override_mode = DEFAULT_OVERRIDE_FRAMERATE;
 }
 
 static void
@@ -2114,10 +2187,19 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
       modified = TRUE;
     }
 
-    /* 0/1 is set as the default in the codec parser, we will set
-     * it in case we have no info */
-    gst_h264_video_calculate_framerate (sps, h264parse->field_pic_flag,
-        h264parse->sei_pic_struct, &fps_num, &fps_den);
+    /* Don't accept non-fixed framerate if user requested */
+    if (h264parse->framerate_override_mode !=
+        GST_H264_PARSE_FRAMERATE_OVERRIDE_FIXED ||
+        (h264parse->framerate_override_mode ==
+            GST_H264_PARSE_FRAMERATE_OVERRIDE_FIXED &&
+            vui->fixed_frame_rate_flag)) {
+      gst_h264_video_calculate_framerate (sps, h264parse->field_pic_flag,
+          h264parse->sei_pic_struct, &fps_num, &fps_den);
+    } else {
+      fps_num = 0;
+      fps_den = 1;
+    }
+
     if (G_UNLIKELY (h264parse->fps_num != fps_num
             || h264parse->fps_den != fps_den)) {
       GST_DEBUG_OBJECT (h264parse, "framerate changed %d/%d", fps_num, fps_den);
@@ -2177,6 +2259,7 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
       const gchar *chroma_format = NULL;
       guint bit_depth_chroma;
       const gchar *coded_picture_structure;
+      gboolean use_upstream_framerate;
 
       fps_num = h264parse->fps_num;
       fps_den = h264parse->fps_den;
@@ -2229,8 +2312,44 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
       gst_caps_set_simple (caps, "width", G_TYPE_INT, width,
           "height", G_TYPE_INT, height, NULL);
 
+      use_upstream_framerate = FALSE;
+      switch (h264parse->framerate_override_mode) {
+        case GST_H264_PARSE_FRAMERATE_OVERRIDE_NONE:
+          /* Prefer upstream framerate */
+          use_upstream_framerate = TRUE;
+          GST_LOG_OBJECT (h264parse, "Prefer upstream framerate");
+          break;
+        case GST_H264_PARSE_FRAMERATE_OVERRIDE_PARSED:
+          /* Use upstream framerate if timing_info_present_flag is zero */
+          if (!vui->timing_info_present_flag) {
+            use_upstream_framerate = TRUE;
+            GST_LOG_OBJECT (h264parse,
+                "timing_info_present_flag is not present in bitstream");
+          } else {
+            GST_LOG_OBJECT (h264parse,
+                "timing_info_present_flag present in bitstream, "
+                "use framerate %d/%d", fps_num, fps_den);
+          }
+          break;
+        case GST_H264_PARSE_FRAMERATE_OVERRIDE_FIXED:
+          /* Use upstream framerate if both timing_info_present_flag and
+           * fixed_frame_rate_flag are zero */
+          if (!vui->timing_info_present_flag || !vui->fixed_frame_rate_flag) {
+            use_upstream_framerate = TRUE;
+            GST_LOG_OBJECT (h264parse,
+                "timing_info_present_flag or fixed_frame_rate_flag is not "
+                "present in bitstream");
+          } else {
+            GST_LOG_OBJECT (h264parse,
+                "timing_info_present_flag and fixed_frame_rate_flag are present "
+                "in bitstream, use framerate %d/%d", fps_num, fps_den);
+          }
+          break;
+      }
+
       /* upstream overrides */
-      if (s && gst_structure_has_field (s, "framerate")) {
+      if (use_upstream_framerate &&
+          s && gst_structure_has_field (s, "framerate")) {
         gst_structure_get_fraction (s, "framerate", &fps_num, &fps_den);
       }
 
@@ -3764,6 +3883,9 @@ gst_h264_parse_set_property (GObject * object, guint prop_id,
     case PROP_UPDATE_TIMECODE:
       parse->update_timecode = g_value_get_boolean (value);
       break;
+    case PROP_FRAMERATE_OVERRIDE_MODE:
+      parse->framerate_override_mode = g_value_get_enum (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -3784,6 +3906,9 @@ gst_h264_parse_get_property (GObject * object, guint prop_id,
       break;
     case PROP_UPDATE_TIMECODE:
       g_value_set_boolean (value, parse->update_timecode);
+      break;
+    case PROP_FRAMERATE_OVERRIDE_MODE:
+      g_value_set_enum (value, parse->framerate_override_mode);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
