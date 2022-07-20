@@ -52,7 +52,7 @@ enum
   PROP_DISABLE_SCALING,
 };
 
-#define DEFAULT_PROP_DISABLE_SCALING FALSE
+#define DEFAULT_PROP_DISABLE_SCALING TRUE
 
 static void
 gst_video_convert_get_property (GObject * object, guint prop_id,
@@ -110,5 +110,6 @@ gst_video_convert_class_init (GstVideoConvertClass * klass)
 static void
 gst_video_convert_init (GstVideoConvert * self)
 {
-
+  gst_video_convert_scale_set_scales (GST_VIDEO_CONVERT_SCALE (self),
+      DEFAULT_PROP_DISABLE_SCALING);
 }

@@ -51,7 +51,7 @@
 #endif
 
 #define DEFAULT_PROP_GAMMA_DECODE FALSE
-#define DEFAULT_PROP_DISABLE_CONVERSION FALSE
+#define DEFAULT_PROP_DISABLE_CONVERSION TRUE
 
 #include "gstvideoscale.h"
 
@@ -145,5 +145,6 @@ gst_video_scale_class_init (GstVideoScaleClass * klass)
 static void
 gst_video_scale_init (GstVideoScale * self)
 {
-
+  gst_video_convert_scale_set_converts (GST_VIDEO_CONVERT_SCALE (self),
+      DEFAULT_PROP_DISABLE_CONVERSION);
 }
