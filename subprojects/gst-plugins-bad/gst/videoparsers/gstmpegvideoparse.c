@@ -765,6 +765,7 @@ gst_mpegv_parse_update_src_caps (GstMpegvParse * mpvparse)
 {
   GstCaps *caps = NULL;
   GstStructure *s = NULL;
+  gboolean update_par = FALSE;
 
   /* only update if no src caps yet or explicitly triggered */
   if (G_LIKELY (gst_pad_has_current_caps (GST_BASE_PARSE_SRC_PAD (mpvparse)) &&
@@ -794,6 +795,7 @@ gst_mpegv_parse_update_src_caps (GstMpegvParse * mpvparse)
   if (mpvparse->sequencehdr.width > 0 && mpvparse->sequencehdr.height > 0) {
     GstMpegVideoSequenceDisplayExt *seqdispext;
     gint width, height;
+    gint upstream_width, upstream_height;
 
     width = mpvparse->sequencehdr.width;
     height = mpvparse->sequencehdr.height;
@@ -810,6 +812,15 @@ gst_mpegv_parse_update_src_caps (GstMpegvParse * mpvparse)
             width, height);
       }
     }
+
+    /* upstream resolution is different from one we parsed and updated.
+     * uses parsed par in this case */
+    if (s && gst_structure_get_int (s, "width", &upstream_width) &&
+        gst_structure_get_int (s, "height", &upstream_height) &&
+        (upstream_width != width || upstream_height != height)) {
+      update_par = TRUE;
+    }
+
     gst_caps_set_simple (caps, "width", G_TYPE_INT, width,
         "height", G_TYPE_INT, height, NULL);
   }
@@ -836,7 +847,8 @@ gst_mpegv_parse_update_src_caps (GstMpegvParse * mpvparse)
 
   /* or pixel-aspect-ratio */
   if (mpvparse->sequencehdr.par_w && mpvparse->sequencehdr.par_h > 0 &&
-      (!s || !gst_structure_has_field (s, "pixel-aspect-ratio"))) {
+      (!s || !gst_structure_has_field (s, "pixel-aspect-ratio")
+          || update_par)) {
     gst_caps_set_simple (caps, "pixel-aspect-ratio", GST_TYPE_FRACTION,
         mpvparse->sequencehdr.par_w, mpvparse->sequencehdr.par_h, NULL);
   }
