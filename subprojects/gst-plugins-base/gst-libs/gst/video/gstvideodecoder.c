@@ -3104,27 +3104,23 @@ gst_video_decoder_prepare_finish_frame (GstVideoDecoder *
   }
 
   if (frame->pts == GST_CLOCK_TIME_NONE) {
-    /* Last ditch timestamp guess: Just add the duration to the previous
-     * frame. If it's the first frame, just use the segment start. */
-    if (frame->duration != GST_CLOCK_TIME_NONE) {
-      if (GST_CLOCK_TIME_IS_VALID (priv->last_timestamp_out))
-        frame->pts = priv->last_timestamp_out + frame->duration;
-      else if (frame->dts != GST_CLOCK_TIME_NONE) {
-        frame->pts = frame->dts;
-        GST_LOG_OBJECT (decoder,
-            "Setting DTS as PTS %" GST_TIME_FORMAT " for frame...",
-            GST_TIME_ARGS (frame->pts));
-      } else if (decoder->output_segment.rate > 0.0)
-        frame->pts = decoder->output_segment.start;
-      GST_INFO_OBJECT (decoder,
-          "Guessing PTS=%" GST_TIME_FORMAT " for frame... DTS=%"
-          GST_TIME_FORMAT, GST_TIME_ARGS (frame->pts),
-          GST_TIME_ARGS (frame->dts));
-    } else if (sync && frame->dts != GST_CLOCK_TIME_NONE) {
+    if (frame->dts != GST_CLOCK_TIME_NONE) {
       frame->pts = frame->dts;
       GST_LOG_OBJECT (decoder,
           "Setting DTS as PTS %" GST_TIME_FORMAT " for frame...",
           GST_TIME_ARGS (frame->pts));
+    } else if (frame->duration != GST_CLOCK_TIME_NONE) {
+      /* Last ditch timestamp guess: Just add the duration to the previous
+       * frame. If it's the first frame, just use the segment start. */
+      if (GST_CLOCK_TIME_IS_VALID (priv->last_timestamp_out))
+        frame->pts = priv->last_timestamp_out + frame->duration;
+      else if (decoder->output_segment.rate > 0.0)
+        frame->pts = decoder->output_segment.start;
+
+      GST_INFO_OBJECT (decoder,
+          "Guessing PTS=%" GST_TIME_FORMAT " for frame... DTS=%"
+          GST_TIME_FORMAT, GST_TIME_ARGS (frame->pts),
+          GST_TIME_ARGS (frame->dts));
     }
   }
 
