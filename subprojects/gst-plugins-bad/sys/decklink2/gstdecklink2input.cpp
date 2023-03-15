@@ -187,7 +187,9 @@ private:
     while (!buffers_.empty ()) {
       void *buf = buffers_.front ();
       buffers_.pop ();
-      ALIGNED_FREE (buf);
+      guint8 *aligned_buf = (guint8 *) buf;
+      aligned_buf -= 64;
+      ALIGNED_FREE (aligned_buf);
     }
   }
 
@@ -351,9 +353,15 @@ struct TimeMapping
 
 struct GstDeckLink2InputPrivate
 {
+  GstDeckLink2InputPrivate ()
+  {
+    signal = false;
+  }
+
   std::mutex lock;
   std::condition_variable cond;
   std::queue<GstSample *> queue;
+  std::atomic<bool> signal;
 };
 
 struct _GstDeckLink2Input
@@ -1582,50 +1590,55 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     flags = frame->GetFlags ();
     if ((flags & bmdFrameHasNoInputSource) != 0) {
       GST_BUFFER_FLAG_SET (buffer, GST_BUFFER_FLAG_GAP);
-    } else if (self->output_cc || self->output_afd_bar) {
-      extract_vbi (self, buffer, frame);
+      priv->signal = false;
+    } else {
+      priv->signal = true;
 
-      if (self->aspect_ratio_flag == 1 && self->auto_detect) {
-        BMDDisplayMode mode = self->selected_mode.mode;
+      if (self->output_cc || self->output_afd_bar) {
+        extract_vbi (self, buffer, frame);
 
-        switch (self->selected_mode.mode) {
-          case bmdModeNTSC:
-            mode = bmdModeNTSC_W;
-            break;
-          case bmdModeNTSC2398:
-            mode = bmdModeNTSC2398_W;
-            break;
-          case bmdModePAL:
-            mode = bmdModePAL_W;
-            break;
-          case bmdModeNTSCp:
-            mode = bmdModeNTSCp_W;
-            break;
-          case bmdModePALp:
-            mode = bmdModePALp_W;
-            break;
-          default:
-            break;
-        }
+        if (self->aspect_ratio_flag == 1 && self->auto_detect) {
+          BMDDisplayMode mode = self->selected_mode.mode;
 
-        if (mode != self->selected_mode.mode) {
-          GstDeckLink2DisplayMode new_mode;
-          GstVideoFormat video_format;
-          GstCaps *caps;
-          gst_decklink2_input_get_display_mode_from_native (self,
-              mode, &new_mode);
+          switch (self->selected_mode.mode) {
+            case bmdModeNTSC:
+              mode = bmdModeNTSC_W;
+              break;
+            case bmdModeNTSC2398:
+              mode = bmdModeNTSC2398_W;
+              break;
+            case bmdModePAL:
+              mode = bmdModePAL_W;
+              break;
+            case bmdModeNTSCp:
+              mode = bmdModeNTSCp_W;
+              break;
+            case bmdModePALp:
+              mode = bmdModePALp_W;
+              break;
+            default:
+              break;
+          }
 
-          video_format =
-              gst_decklink2_video_format_from_pixel_format (self->pixel_format);
-          caps = gst_decklink2_get_caps_from_mode (&new_mode);
-          gst_caps_set_simple (caps, "format", G_TYPE_STRING,
-              gst_video_format_to_string (video_format), nullptr);
+          if (mode != self->selected_mode.mode) {
+            GstDeckLink2DisplayMode new_mode;
+            GstVideoFormat video_format;
+            GstCaps *caps;
+            gst_decklink2_input_get_display_mode_from_native (self,
+                mode, &new_mode);
 
-          GST_DEBUG_OBJECT (self, "Update caps %" GST_PTR_FORMAT " to %"
-              GST_PTR_FORMAT, self->selected_video_caps, caps);
-          self->selected_mode = new_mode;
-          gst_caps_replace (&self->selected_video_caps, caps);
-          gst_caps_unref (caps);
+            video_format =
+                gst_decklink2_video_format_from_pixel_format (self->pixel_format);
+            caps = gst_decklink2_get_caps_from_mode (&new_mode);
+            gst_caps_set_simple (caps, "format", G_TYPE_STRING,
+                gst_video_format_to_string (video_format), nullptr);
+
+            GST_DEBUG_OBJECT (self, "Update caps %" GST_PTR_FORMAT " to %"
+                GST_PTR_FORMAT, self->selected_video_caps, caps);
+            self->selected_mode = new_mode;
+            gst_caps_replace (&self->selected_video_caps, caps);
+            gst_caps_unref (caps);
+          }
         }
       }
     }
@@ -1870,6 +1883,7 @@ gst_decklink2_input_stop_unlocked (GstDeckLink2Input * self)
   }
   gst_clear_caps (&self->selected_video_caps);
   gst_clear_caps (&self->selected_audio_caps);
+  priv->signal = false;
 }
 
 HRESULT
@@ -2069,4 +2083,15 @@ gst_decklink2_input_get_sample (GstDeckLink2Input * input, GstSample ** sample)
   priv->queue.pop ();
 
   return GST_FLOW_OK;
+}
+
+gboolean
+gst_decklink2_input_has_signal (GstDeckLink2Input * input)
+{
+  GstDeckLink2InputPrivate *priv = input->priv;
+
+  if (priv->signal)
+    return TRUE;
+
+  return FALSE;
 }

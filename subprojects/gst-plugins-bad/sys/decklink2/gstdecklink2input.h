@@ -72,5 +72,6 @@ void                gst_decklink2_input_set_flushing (GstDeckLink2Input * input,
 GstFlowReturn       gst_decklink2_input_get_sample (GstDeckLink2Input * input,
                                                     GstSample ** sample);
 
+gboolean            gst_decklink2_input_has_signal (GstDeckLink2Input * input);
 
 G_END_DECLS

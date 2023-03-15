@@ -52,6 +52,7 @@ static void gst_decklink2_src_bin_get_property (GObject * object,
 static GstCaps * gst_decklink2_src_bin_get_caps (GstBaseSrc * src,
     GstCaps * filter);
 
+static void on_signal (GObject *object, GParamSpec * pspec, GstElement * self);
 static void on_pad_added (GstElement * demux, GstPad * pad,
     GstDeckLink2SrcBin * self);
 static void on_pad_removed (GstElement * demux, GstPad * pad,
@@ -107,6 +108,8 @@ gst_decklink2_src_bin_init (GstDeckLink2SrcBin * self)
   gst_object_unref (pad);
   gst_element_add_pad (GST_ELEMENT (self), gpad);
 
+  g_signal_connect (self->src, "notify::signal", G_CALLBACK (on_signal), self);
+
   g_signal_connect (self->demux, "pad-added", G_CALLBACK (on_pad_added), self);
   g_signal_connect (self->demux,
       "pad-removed", G_CALLBACK (on_pad_removed), self);
@@ -142,6 +145,12 @@ copy_sticky_events (GstPad * pad, GstEvent ** event, GstPad * gpad)
   gst_pad_store_sticky_event (gpad, *event);
 
   return TRUE;
+}
+
+static void
+on_signal (GObject *object, GParamSpec * pspec, GstElement * self)
+{
+  g_object_notify (G_OBJECT (self), "signal");
 }
 
 static void

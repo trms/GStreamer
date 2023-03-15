@@ -47,6 +47,7 @@ enum
   PROP_OUTPUT_CC,
   PROP_OUTPUT_AFD_BAR,
   PROP_BUFFER_SIZE,
+  PROP_SIGNAL,
 };
 
 #define DEFAULT_MODE                bmdModeUnknown
@@ -78,6 +79,7 @@ struct _GstDeckLink2Src
   GstDeckLink2Input *input;
   GstDeckLink2DisplayMode selected_mode;
   GstCaps *selected_caps;
+  gboolean is_gap_buf;
 
   gboolean running;
 
@@ -173,6 +175,7 @@ gst_decklink2_src_init (GstDeckLink2Src * self)
   self->output_cc = DEFAULT_OUTPUT_CC;
   self->output_afd_bar = DEFAULT_OUTPUT_AFD_BAR;
   self->buffer_size = DEFAULT_BUFFER_SIZE;
+  self->is_gap_buf = FALSE;
 
   self->priv = new GstDeckLink2SrcPrivate ();
 
@@ -287,6 +290,15 @@ gst_decklink2_src_get_property (GObject * object, guint prop_id, GValue * value,
     case PROP_BUFFER_SIZE:
       g_value_set_uint (value, self->buffer_size);
       break;
+    case PROP_SIGNAL:
+    {
+      gboolean has_signal = FALSE;
+      if (self->input)
+        has_signal = gst_decklink2_input_has_signal (self->input);
+
+      g_value_set_boolean (value, has_signal);
+      break;
+    }
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -522,6 +534,7 @@ gst_decklink2_src_create (GstPushSrc * src, GstBuffer ** buffer)
   GstCaps *caps;
   GstFlowReturn ret;
   GstDeckLink2SrcPrivate *priv = self->priv;
+  gboolean is_gap_buf = FALSE;
 
   if (!gst_decklink2_src_run (self)) {
     GST_ELEMENT_ERROR (self, STREAM, FAILED, (nullptr),
@@ -547,6 +560,14 @@ gst_decklink2_src_create (GstPushSrc * src, GstBuffer ** buffer)
   }
 
   *buffer = gst_sample_get_buffer (sample);
+  if (GST_BUFFER_FLAG_IS_SET (*buffer, GST_BUFFER_FLAG_GAP))
+    is_gap_buf = TRUE;
+
+  if (is_gap_buf != self->is_gap_buf) {
+    self->is_gap_buf = is_gap_buf;
+    g_object_notify (G_OBJECT (self), "signal");
+  }
+
   gst_buffer_ref (*buffer);
   gst_sample_unref (sample);
 
@@ -631,4 +652,9 @@ gst_decklink2_src_install_properties (GObjectClass * object_class)
       g_param_spec_uint ("buffer-size", "Buffer Size",
           "Size of internal buffer in number of video frames", 1,
           16, DEFAULT_BUFFER_SIZE, param_flags));
+
+ g_object_class_install_property (object_class, PROP_SIGNAL,
+      g_param_spec_boolean ("signal", "Signal",
+          "True if there is a valid input signal available",
+          FALSE, (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
 }
