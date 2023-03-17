@@ -24,8 +24,6 @@
 #include "gstdecklinkdeviceprovider.h"
 #include "gstdecklink.h"
 
-#define DEFAULT_PERSISTENT_ID (-1)
-
 G_DEFINE_TYPE (GstDecklinkDeviceProvider, gst_decklink_device_provider,
     GST_TYPE_DEVICE_PROVIDER);
 GST_DEVICE_PROVIDER_REGISTER_DEFINE (decklinkdeviceprovider, "decklinkdeviceprovider",
@@ -79,7 +77,7 @@ gst_decklink_device_create_element (GstDevice * device, const gchar * name)
   }
 
   if (ret) {
-    g_object_set (ret, "persistent-id", self->persistent_id, NULL);
+    g_object_set (ret, "device-number", self->device_number, NULL);
   }
 
   return ret;

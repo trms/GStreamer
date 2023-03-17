@@ -62,7 +62,6 @@ struct _GstDecklinkVideoSrc
   BMDPixelFormat caps_format;
   GstDecklinkConnectionEnum connection;
   gint device_number;
-  gint64 persistent_id;
   gboolean output_stream_time;
   GstClockTime skip_first_time;
   gboolean drop_no_signal_frames;

@@ -52,7 +52,6 @@ struct _GstDecklinkAudioSrc
   GstDecklinkModeEnum mode;
   GstDecklinkAudioConnectionEnum connection;
   gint device_number;
-  gint64 persistent_id;
   GstDecklinkAudioChannelsEnum channels;
   gint64 channels_found;
 
