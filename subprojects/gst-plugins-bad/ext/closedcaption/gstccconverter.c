@@ -1564,14 +1564,20 @@ can_generate_output (GstCCConverter * self)
 
   /* compute the relative frame count for each */
   if (!gst_util_fraction_multiply (self->in_fps_d, self->in_fps_n,
-          self->input_frames, 1, &input_frame_n, &input_frame_d))
-    /* we should never overflow */
-    g_assert_not_reached ();
+          self->input_frames, 1, &input_frame_n, &input_frame_d)) {
+    GST_ERROR_OBJECT (self,
+        "Couldn't get input rate, fps: %d/%d, input frames %d",
+        self->in_fps_n, self->in_fps_d, self->input_frames);
+    return FALSE;
+  }
 
   if (!gst_util_fraction_multiply (self->out_fps_d, self->out_fps_n,
-          self->output_frames, 1, &output_frame_n, &output_frame_d))
-    /* we should never overflow */
-    g_assert_not_reached ();
+          self->output_frames, 1, &output_frame_n, &output_frame_d)) {
+    GST_ERROR_OBJECT (self,
+        "Couldn't get output rate, fps: %d/%d, output frames %d",
+        self->out_fps_n, self->out_fps_d, self->output_frames);
+    return FALSE;
+  }
 
   output_time_cmp = gst_util_fraction_compare (input_frame_n, input_frame_d,
       output_frame_n, output_frame_d);
