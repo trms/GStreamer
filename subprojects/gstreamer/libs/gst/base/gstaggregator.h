@@ -441,6 +441,9 @@ GST_BASE_API
 void            gst_aggregator_set_force_live       (GstAggregator *self,
                                                      gboolean force_live);
 
+GST_BASE_API
+void            gst_aggregator_ensure_mandatory_events (GstAggregator * self);
+
 /**
  * GstAggregatorStartTimeSelection:
  * @GST_AGGREGATOR_START_TIME_SELECTION_ZERO: Start at running time 0.
