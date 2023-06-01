@@ -12,6 +12,7 @@ foreach plugin : ['accurip', 'adpcmdec', 'adpcmenc', 'aiff', 'asfmux',
                   'rawparse', 'removesilence', 'rist', 'rtmp2', 'rtp', 'sdp',
                   'segmentclip', 'siren', 'smooth', 'speed', 'subenc', 'switchbin',
                   'tensordecoders', 'timecode', 'transcode', 'unixfd', 'videofilters',
+                  'streamselector',
                   'videoframe_audiolevel', 'videoparsers', 'videosignal',
                   'vmnc', 'y4m']
   subdir(plugin)
