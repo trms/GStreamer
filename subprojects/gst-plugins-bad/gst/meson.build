@@ -10,7 +10,7 @@ foreach plugin : ['accurip', 'adpcmdec', 'adpcmenc', 'aiff', 'asfmux',
                   'midi', 'mpegdemux', 'mpegpsmux', 'mpegtsdemux', 'mpegtsmux',
                   'mse', 'mxf', 'netsim', 'onvif', 'pcapparse', 'pnm', 'proxy',
                   'rawparse', 'removesilence', 'rist', 'rtmp2', 'rtp', 'sdp',
-                  'segmentclip', 'siren', 'smooth', 'speed', 'subenc', 'switchbin',
+                  'segmentclip', 'siren', 'smooth', 'speed', 'streamselector', 'subenc', 'switchbin',
                   'tensordecoders', 'timecode', 'transcode', 'unixfd', 'videofilters',
                   'videoframe_audiolevel', 'videoparsers', 'videosignal',
                   'vmnc', 'y4m']
