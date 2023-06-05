@@ -383,6 +383,8 @@ gst_stream_selector_update_active_pad_unlocked (GstStreamSelector * self)
   if (!active && first) {
     spad = GST_STREAM_SELECTOR_PAD (first);
     spad->active = TRUE;
+
+    GST_DEBUG_OBJECT (spad, "New active pad");
   }
 }
 
@@ -412,6 +414,7 @@ gst_stream_selector_set_active_pad (GstStreamSelector * self,
     }
 
     pad->active = TRUE;
+    GST_DEBUG_OBJECT (pad, "New active pad");
   }
 
   GST_OBJECT_UNLOCK (self);
@@ -559,8 +562,11 @@ gst_stream_selector_sink_event (GstAggregator * agg, GstAggregatorPad * pad,
       if (!active)
         break;
 
-      if (active == GST_PAD_CAST (pad))
+      if (active == GST_PAD_CAST (pad)) {
+        GST_DEBUG_OBJECT (active, "Pad is active, schedule update segment %"
+            GST_SEGMENT_FORMAT, segment);
         gst_aggregator_update_segment (agg, segment);
+      }
 
       gst_object_unref (active);
       break;
@@ -664,23 +670,24 @@ gst_stream_selector_aggregate (GstAggregator * agg, gboolean timeout)
   }
 
   if (active_pad != self->active_pad) {
+    GST_DEBUG_OBJECT (active_pad, "Updated new active pad");
     gst_clear_object (&self->active_pad);
     self->active_pad = gst_object_ref (active_pad);
     active_changed = TRUE;
+  } else {
+    GST_LOG_OBJECT (active_pad, "Current active pad");
   }
 
   active_agg_pad = GST_AGGREGATOR_PAD_CAST (active_pad);
 
   buf = gst_aggregator_pad_pop_buffer (active_agg_pad);
-  if (!buf) {
-    if (gst_aggregator_pad_is_eos (active_agg_pad)) {
-      GST_DEBUG_OBJECT (self, "Active pad is EOS");
-      active_eos = TRUE;
-    } else {
-      GST_DEBUG_OBJECT (self, "active pad is not ready");
-      goto need_data;
-    }
+  if (!buf && gst_aggregator_pad_is_eos (active_agg_pad)) {
+    GST_DEBUG_OBJECT (self, "Active pad is EOS");
+    active_eos = TRUE;
   }
+
+  output_running_time = gst_segment_to_running_time (&srcpad->segment,
+      GST_FORMAT_TIME, srcpad->segment.position);
 
   if (buf) {
     timestamp = GST_BUFFER_PTS (buf);
@@ -702,10 +709,9 @@ gst_stream_selector_aggregate (GstAggregator * agg, gboolean timeout)
     GST_LOG_OBJECT (self, "Current running time %" GST_TIME_FORMAT " - %"
         GST_TIME_FORMAT, GST_TIME_ARGS (running_time),
         GST_TIME_ARGS (running_time_end));
+  } else {
+    running_time_end = output_running_time;
   }
-
-  output_running_time = gst_segment_to_running_time (&srcpad->segment,
-      GST_FORMAT_TIME, srcpad->segment.position);
 
   for (iter = elem->sinkpads; iter; iter = g_list_next (iter)) {
     GstAggregatorPad *other_pad = GST_AGGREGATOR_PAD_CAST (iter->data);
@@ -766,6 +772,10 @@ gst_stream_selector_aggregate (GstAggregator * agg, gboolean timeout)
     GST_DEBUG_OBJECT (self, "All pads are EOS");
 
     return GST_FLOW_EOS;
+  } else if (!buf) {
+    GST_LOG_OBJECT (self, "Active pad is not ready");
+    gst_object_unref (active_pad);
+    return GST_AGGREGATOR_FLOW_NEED_DATA;
   }
 
   srcpad->segment.position =
