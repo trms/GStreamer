@@ -94,12 +94,18 @@ gst_decklink2_src_bin_init (GstDeckLink2SrcBin * self)
 {
   GstPad *pad;
   GstPad *gpad;
+  GstElement *queue;
 
   self->src = gst_element_factory_make ("decklink2src", NULL);
   self->demux = gst_element_factory_make ("decklink2demux", NULL);
 
-  gst_bin_add_many (GST_BIN (self), self->src, self->demux, NULL);
-  gst_element_link (self->src, self->demux);
+  queue = gst_element_factory_make ("queue", NULL);
+
+  g_object_set (queue, "max-size-buffers", 3, "max-size-bytes", 0,
+      "max-size-time", (guint64) 0, NULL);
+
+  gst_bin_add_many (GST_BIN (self), self->src, queue, self->demux, NULL);
+  gst_element_link_many (self->src, queue, self->demux, NULL);
 
   pad = gst_element_get_static_pad (self->demux, "video");
   gpad = gst_ghost_pad_new ("video", pad);
