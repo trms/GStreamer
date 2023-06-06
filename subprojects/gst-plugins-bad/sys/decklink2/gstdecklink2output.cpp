@@ -30,17 +30,167 @@
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
+#include <vector>
+#include <string.h>
+#include <string>
 
 GST_DEBUG_CATEGORY_STATIC (gst_decklink2_output_debug);
 #define GST_CAT_DEFAULT gst_decklink2_output_debug
 
 class IGstDeckLinkVideoOutputCallback;
 
+class GstDecklink2OutputAudioBuffer
+{
+public:
+  void Init (const gchar * debug_name, const GstAudioInfo & info, gint fps_n,
+      gint fps_d)
+  {
+    info_ = info;
+    buffer_.clear ();
+    video_frame_dup_drop_count_ = 0;
+    dup_drop_sample_offset_end_ = 0;
+    samples_to_drop_ = 0;
+    fps_n_ = fps_n;
+    fps_d_ = fps_d;
+    init_done_ = true;
+    if (debug_name)
+      debug_name_ = debug_name;
+    else
+      debug_name_ = "GstDecklink2OutputAudioBuffer";
+  }
+
+  void Deinit ()
+  {
+    buffer_.clear ();
+    init_done_ = false;
+  }
+
+  void Append (const guint8 * data, size_t size)
+  {
+    if (!data || size == 0 || !init_done_)
+      return;
+
+    size_t cur_size = buffer_.size ();
+    size_t num_samples = size / info_.bpf;
+
+    GST_LOG_ID (debug_name_.c_str (), "Appending %" G_GSIZE_FORMAT " samples",
+        num_samples);
+
+    if (samples_to_drop_) {
+      GST_WARNING_ID (debug_name_.c_str (), "audio samples to drop %"
+          G_GUINT64_FORMAT ", new sample count %" G_GSIZE_FORMAT,
+          samples_to_drop_, num_samples);
+
+      if (num_samples >= samples_to_drop_) {
+        size_t actual_append_samples = num_samples - samples_to_drop_;
+        size_t bytes_to_drop = samples_to_drop_ * info_.bpf;
+        samples_to_drop_ = 0;
+        if (actual_append_samples == 0)
+          return;
+
+        data += bytes_to_drop;
+        size -= bytes_to_drop;
+      } else {
+        samples_to_drop_ -= num_samples;
+        return;
+      }
+    }
+
+    buffer_.resize (cur_size + size);
+    memcpy (&buffer_[0] + cur_size, data, size);
+  }
+
+  void Drop ()
+  {
+    if (!init_done_)
+      return;
+
+    video_frame_dup_drop_count_++;
+    guint64 next_sample_offset =
+        gst_util_uint64_scale (video_frame_dup_drop_count_,
+        fps_d_ * info_.rate, fps_n_);
+    guint64 num_samples = next_sample_offset - dup_drop_sample_offset_end_;
+    samples_to_drop_ += num_samples;
+    dup_drop_sample_offset_end_ = next_sample_offset;
+
+    GST_WARNING_ID (debug_name_.c_str (), "Samples to drop %" G_GUINT64_FORMAT
+        ", total samples to drop %" G_GUINT64_FORMAT, num_samples,
+        samples_to_drop_);
+
+    size_t bytes_to_drop = samples_to_drop_ * info_.bpf;
+    size_t cur_size = buffer_.size ();
+    if (cur_size >= bytes_to_drop) {
+      buffer_.resize (cur_size - bytes_to_drop);
+      samples_to_drop_ = 0;
+    } else {
+      guint64 samples_in_buffer = cur_size / info_.bpf;
+      samples_to_drop_ -= samples_in_buffer;
+      buffer_.clear ();
+    }
+  }
+
+  void PrependSilence ()
+  {
+    if (!init_done_)
+      return;
+
+    video_frame_dup_drop_count_++;
+    guint64 next_sample_offset =
+        gst_util_uint64_scale (video_frame_dup_drop_count_,
+        fps_d_ * info_.rate, fps_n_);
+    guint64 num_samples = next_sample_offset - dup_drop_sample_offset_end_;
+    dup_drop_sample_offset_end_ = next_sample_offset;
+
+    GST_WARNING_ID (debug_name_.c_str (), "Prepending silence %"
+        G_GUINT64_FORMAT " samples", num_samples);
+
+    size_t silence_length_in_bytes = num_samples * info_.bpf;
+    size_t cur_size = buffer_.size ();
+
+    buffer_.resize (cur_size + num_samples);
+    if (cur_size > 0) {
+      memmove (&buffer_[0] + silence_length_in_bytes, &buffer_[0],
+          cur_size);
+    }
+
+    gst_audio_format_info_fill_silence (info_.finfo, &buffer_[0],
+        silence_length_in_bytes);
+  }
+
+  guint8 *GetSamples (guint & num_samples)
+  {
+    if (!init_done_) {
+      num_samples = 0;
+      return NULL;
+    }
+
+    num_samples = buffer_.size () / info_.bpf;
+    return &buffer_[0];
+  }
+
+  void Flush ()
+  {
+    buffer_.resize (0);
+  }
+
+private:
+  std::vector < guint8 > buffer_;
+  guint64 video_frame_dup_drop_count_ = 0;
+  guint64 dup_drop_sample_offset_end_ = 0;
+  guint64 samples_to_drop_ = 0;
+  GstAudioInfo info_;
+  gint fps_n_;
+  gint fps_d_;
+  bool init_done_ = false;
+  std::string debug_name_;
+};
+
 struct GstDeckLink2OutputPrivate
 {
   std::mutex extern_lock;
   std::mutex schedule_lock;
   std::condition_variable cond;
+  GstDecklink2OutputAudioBuffer audio_buf;
 };
 
 struct _GstDeckLink2Output
@@ -754,10 +904,13 @@ gst_decklink2_output_start (GstDeckLink2Output * self,
 
 static HRESULT
 gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
-    IDeckLinkVideoFrame * frame, guint8 * audio_buf, gsize audio_buf_size)
+    IDeckLinkVideoFrame * frame)
 {
+  GstDeckLink2OutputPrivate *priv = self->priv;
   GstClockTime next_pts, dur;
   HRESULT hr = E_FAIL;
+  guint num_samples;
+  guint8 *audio_buf;
 
   frame->AddRef ();
   GST_DECKLINK2_CLEAR_COM (self->last_frame);
@@ -768,8 +921,7 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
       self->selected_mode.fps_d * GST_SECOND, self->selected_mode.fps_n);
   dur = next_pts - self->pts;
 
-  GST_LOG_OBJECT (self, "Scheduling video frame %p, audio-buf-size %"
-      G_GSIZE_FORMAT, frame, audio_buf_size);
+  GST_LOG_OBJECT (self, "Scheduling video frame %p", frame);
 
   switch (self->api_level) {
     case GST_DECKLINK2_API_LEVEL_10_11:
@@ -796,6 +948,8 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
     return hr;
   }
 
+  audio_buf = priv->audio_buf.GetSamples (num_samples);
+
   if (!self->prerolled) {
     if (self->n_prerolled == 0 && GST_AUDIO_INFO_IS_VALID (&self->audio_info)) {
       GST_DEBUG_OBJECT (self, "Begin audio preroll");
@@ -808,11 +962,11 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
       }
     }
 
-    if (audio_buf && audio_buf_size > 0) {
-      guint num_samples = audio_buf_size / self->audio_info.bpf;
-
+    if (audio_buf && num_samples > 0) {
       hr = gst_decklink2_output_schedule_audio_samples (self,
           audio_buf, num_samples, 0, 0, NULL);
+      priv->audio_buf.Flush ();
+
       if (!gst_decklink2_result (hr)) {
         GST_ERROR_OBJECT (self, "Couldn't schedule audio sample, hr: 0x%x",
             (guint) hr);
@@ -842,11 +996,11 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
 
       self->prerolled = TRUE;
     }
-  } else if (audio_buf && audio_buf_size > 0) {
-    guint num_samples = audio_buf_size / self->audio_info.bpf;
-
+  } else if (audio_buf && num_samples > 0) {
     hr = gst_decklink2_output_schedule_audio_samples (self,
         audio_buf, num_samples, 0, 0, NULL);
+    priv->audio_buf.Flush ();
+
     if (!gst_decklink2_result (hr)) {
       GST_ERROR_OBJECT (self, "Couldn't schedule audio sample, hr: 0x%x",
           (guint) hr);
@@ -887,14 +1041,22 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
     if (count > output->max_buffered) {
       GST_WARNING_OBJECT (output, "Skipping frame, buffered count %u > %u",
           count, output->max_buffered);
+      std::lock_guard < std::mutex > slk (priv->schedule_lock);
+
+      /* audio and video may not be completely aligned. Add this sample
+       * and drop video frame duration amount of audio samples */
+      priv->audio_buf.Append (audio_buf, audio_buf_size);
+      priv->audio_buf.Drop ();
+
       return S_OK;
     }
   }
   lk.unlock ();
 
   std::lock_guard < std::mutex > slk (priv->schedule_lock);
-  return gst_decklink2_output_schedule_video_internal (output, frame,
-      audio_buf, audio_buf_size);
+  priv->audio_buf.Append (audio_buf, audio_buf_size);
+
+  return gst_decklink2_output_schedule_video_internal (output, frame);
 }
 
 static HRESULT
@@ -1755,6 +1917,11 @@ gst_decklink2_output_configure (GstDeckLink2Output * output,
         audio_sample_type == bmdAudioSampleType16bitInteger ?
         GST_AUDIO_FORMAT_S16LE : GST_AUDIO_FORMAT_S32LE, 48000,
         audio_channels, NULL);
+
+    priv->audio_buf.Init (GST_OBJECT_NAME (output), output->audio_info,
+        output->selected_mode.fps_n, output->selected_mode.fps_d);
+  } else {
+    priv->audio_buf.Deinit ();
   }
 
   g_clear_pointer (&output->vbi_enc, gst_video_vbi_encoder_free);
@@ -1799,8 +1966,8 @@ gst_decklink2_output_on_completed (GstDeckLink2Output * self)
     hr = gst_decklink2_output_get_num_bufferred (self, &count);
     if (gst_decklink2_result (hr) && count <= self->min_buffered) {
       GST_WARNING_OBJECT (self, "Underrun, buffered count %u", count);
-      gst_decklink2_output_schedule_video_internal (self, self->last_frame,
-          NULL, 0);
+      priv->audio_buf.PrependSilence ();
+      gst_decklink2_output_schedule_video_internal (self, self->last_frame);
     }
   }
 }
