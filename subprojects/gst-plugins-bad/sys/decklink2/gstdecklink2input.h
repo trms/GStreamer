@@ -29,6 +29,8 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (GstDeckLink2Input, gst_decklink2_input,
     GST, DECKLINK2_INPUT, GstObject);
 
+#define GST_DECKLINK2_INPUT_FLOW_STOPPED GST_FLOW_CUSTOM_ERROR
+
 typedef struct _GstDeckLink2InputVideoConfig
 {
   BMDVideoConnection connection;
