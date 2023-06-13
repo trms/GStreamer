@@ -384,6 +384,7 @@ struct _GstDeckLink2Input
   gboolean discont;
   gboolean audio_discont;
   gboolean flushing;
+  gboolean started;
   GstClockTime skip_first_time;
   GstClockTime start_time;
 
@@ -1878,6 +1879,7 @@ gst_decklink2_input_stop_unlocked (GstDeckLink2Input * self)
   priv->signal = false;
   self->skip_first_time = GST_CLOCK_TIME_NONE;
   self->start_time = GST_CLOCK_TIME_NONE;
+  self->started = FALSE;
 }
 
 HRESULT
@@ -1893,6 +1895,8 @@ gst_decklink2_input_start (GstDeckLink2Input * input, GstElement * client,
 
   gst_decklink2_input_stop_unlocked (input);
   gst_decklink2_input_reset_time_mapping (input);
+
+  input->started = TRUE;
 
   if (skip_first_time > 0 && GST_CLOCK_TIME_IS_VALID (skip_first_time))
     input->skip_first_time = skip_first_time;
@@ -2065,6 +2069,8 @@ gst_decklink2_input_stop (GstDeckLink2Input * input)
 
   gst_decklink2_input_stop_unlocked (input);
   input->client = NULL;
+
+  priv->cond.notify_all ();
 }
 
 void
@@ -2083,11 +2089,14 @@ gst_decklink2_input_get_sample (GstDeckLink2Input * input, GstSample ** sample)
   GstDeckLink2InputPrivate *priv = input->priv;
   std::unique_lock < std::mutex > lk (priv->lock);
 
-  while (priv->queue.empty () && !input->flushing)
+  while (priv->queue.empty () && !input->flushing && input->started)
     priv->cond.wait (lk);
 
   if (input->flushing)
     return GST_FLOW_FLUSHING;
+
+  if (!input->started)
+    return GST_DECKLINK2_INPUT_FLOW_STOPPED;
 
   *sample = priv->queue.front ();
   priv->queue.pop ();

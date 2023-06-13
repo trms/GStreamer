@@ -36,6 +36,15 @@ static GstStaticPadTemplate audio_template = GST_STATIC_PAD_TEMPLATE ("audio",
         "rate = (int) 48000, channels = (int) { 2, 8, 16 }, "
         "layout = (string) interleaved"));
 
+enum
+{
+  /* actions */
+  SIGNAL_RESTART,
+
+  SIGNAL_LAST,
+};
+
+static guint gst_decklink2_src_bin_signals[SIGNAL_LAST] = { 0, };
 
 struct _GstDeckLink2SrcBin
 {
@@ -56,6 +65,7 @@ static void on_pad_added (GstElement * demux, GstPad * pad,
 static void on_pad_removed (GstElement * demux, GstPad * pad,
     GstDeckLink2SrcBin * self);
 static void on_no_more_pads (GstElement * demux, GstDeckLink2SrcBin * self);
+static void on_restart (GstDeckLink2SrcBin * self);
 
 #define gst_decklink2_src_bin_parent_class parent_class
 G_DEFINE_TYPE (GstDeckLink2SrcBin, gst_decklink2_src_bin, GST_TYPE_BIN);
@@ -73,6 +83,11 @@ gst_decklink2_src_bin_class_init (GstDeckLink2SrcBinClass * klass)
   object_class->get_property = gst_decklink2_src_bin_get_property;
 
   gst_decklink2_src_install_properties (object_class);
+
+  gst_decklink2_src_bin_signals[SIGNAL_RESTART] =
+      g_signal_new_class_handler ("restart", G_TYPE_FROM_CLASS (klass),
+      (GSignalFlags) (G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION),
+      G_CALLBACK (on_restart), NULL, NULL, NULL, G_TYPE_NONE, 0);
 
   templ_caps = gst_decklink2_get_default_template_caps ();
   gst_element_class_add_pad_template (element_class,
@@ -209,4 +224,10 @@ static void
 on_no_more_pads (GstElement * demux, GstDeckLink2SrcBin * self)
 {
   gst_element_no_more_pads (GST_ELEMENT (self));
+}
+
+static void
+on_restart (GstDeckLink2SrcBin * self)
+{
+  gst_decklink2_src_restart (GST_DECKLINK2_SRC (self->src));
 }

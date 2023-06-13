@@ -65,6 +65,16 @@ enum
 #define DEFAULT_AUDIO_CHANNELS      GST_DECKLINK2_AUDIO_CHANNELS_2
 #define DEFAULT_SKIP_FIRST_TIME     0
 
+enum
+{
+  /* actions */
+  SIGNAL_RESTART,
+
+  SIGNAL_LAST,
+};
+
+static guint gst_decklink2_src_signals[SIGNAL_LAST] = { 0, };
+
 struct GstDeckLink2SrcPrivate
 {
   std::mutex lock;
@@ -136,6 +146,11 @@ gst_decklink2_src_class_init (GstDeckLink2SrcClass * klass)
   object_class->get_property = gst_decklink2_src_get_property;
 
   gst_decklink2_src_install_properties (object_class);
+
+  gst_decklink2_src_signals[SIGNAL_RESTART] =
+      g_signal_new_class_handler ("restart", G_TYPE_FROM_CLASS (klass),
+      (GSignalFlags) (G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION),
+      G_CALLBACK (gst_decklink2_src_restart), NULL, NULL, NULL, G_TYPE_NONE, 0);
 
   templ_caps = gst_decklink2_get_default_template_caps ();
   gst_element_class_add_pad_template (element_class,
@@ -559,6 +574,7 @@ gst_decklink2_src_create (GstPushSrc * src, GstBuffer ** buffer)
   GstDeckLink2SrcPrivate *priv = self->priv;
   gboolean is_gap_buf = FALSE;
 
+again:
   if (!gst_decklink2_src_run (self)) {
     GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
         ("Failed to start stream"));
@@ -566,8 +582,14 @@ gst_decklink2_src_create (GstPushSrc * src, GstBuffer ** buffer)
   }
 
   ret = gst_decklink2_input_get_sample (self->input, &sample);
-  if (ret != GST_FLOW_OK)
+  if (ret != GST_FLOW_OK) {
+    if (ret == GST_DECKLINK2_INPUT_FLOW_STOPPED) {
+      GST_DEBUG_OBJECT (self, "Input was stopped for restarting");
+      goto again;
+    }
+
     return ret;
+  }
 
   std::unique_lock < std::mutex > lk (priv->lock);
   caps = gst_sample_get_caps (sample);
@@ -687,4 +709,19 @@ gst_decklink2_src_install_properties (GObjectClass * object_class)
           "Skip that much time of initial frames after starting", 0,
           G_MAXUINT64, DEFAULT_SKIP_FIRST_TIME,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+}
+
+void
+gst_decklink2_src_restart (GstDeckLink2Src * self)
+{
+  g_return_if_fail (GST_IS_DECKLINK2_SRC (self));
+
+  GstDeckLink2SrcPrivate *priv = self->priv;
+  std::lock_guard < std::mutex > lk (priv->lock);
+
+  if (self->input && self->running) {
+    GST_INFO_OBJECT (self, "Stopping input for restart");
+    self->running = FALSE;
+    gst_decklink2_input_stop (self->input);
+  }
 }
