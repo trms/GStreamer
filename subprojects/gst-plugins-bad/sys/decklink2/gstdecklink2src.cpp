@@ -48,6 +48,7 @@ enum
   PROP_OUTPUT_AFD_BAR,
   PROP_BUFFER_SIZE,
   PROP_SIGNAL,
+  PROP_SKIP_FIRST_TIME,
 };
 
 #define DEFAULT_MODE                bmdModeUnknown
@@ -62,6 +63,7 @@ enum
 #define DEFAULT_OUTPUT_AFD_BAR      FALSE
 #define DEFAULT_BUFFER_SIZE         5
 #define DEFAULT_AUDIO_CHANNELS      GST_DECKLINK2_AUDIO_CHANNELS_2
+#define DEFAULT_SKIP_FIRST_TIME     0
 
 struct GstDeckLink2SrcPrivate
 {
@@ -96,6 +98,7 @@ struct _GstDeckLink2Src
   gboolean output_cc;
   gboolean output_afd_bar;
   guint buffer_size;
+  GstClockTime skip_first_time;
 };
 
 static void gst_decklink2_src_finalize (GObject * object);
@@ -251,6 +254,9 @@ gst_decklink2_src_set_property (GObject * object, guint prop_id,
     case PROP_BUFFER_SIZE:
       self->buffer_size = g_value_get_uint (value);
       break;
+    case PROP_SKIP_FIRST_TIME:
+      self->skip_first_time = g_value_get_uint64 (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -311,6 +317,9 @@ gst_decklink2_src_get_property (GObject * object, guint prop_id, GValue * value,
       g_value_set_boolean (value, has_signal);
       break;
     }
+    case PROP_SKIP_FIRST_TIME:
+      g_value_set_uint64 (value, self->skip_first_time);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -529,7 +538,8 @@ gst_decklink2_src_run (GstDeckLink2Src * self)
   audio_config.channels = self->audio_channels;
 
   hr = gst_decklink2_input_start (self->input, GST_ELEMENT (self),
-      self->profile_id, self->buffer_size, &video_config, &audio_config);
+      self->profile_id, self->buffer_size, self->skip_first_time,
+      &video_config, &audio_config);
   if (!gst_decklink2_result (hr)) {
     GST_ERROR_OBJECT (self, "Couldn't start stream, hr: 0x%x", (guint) hr);
     return FALSE;
@@ -671,4 +681,10 @@ gst_decklink2_src_install_properties (GObjectClass * object_class)
       g_param_spec_boolean ("signal", "Signal",
           "True if there is a valid input signal available",
           FALSE, (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
+
+  g_object_class_install_property (object_class, PROP_SKIP_FIRST_TIME,
+      g_param_spec_uint64 ("skip-first-time", "Skip First Time",
+          "Skip that much time of initial frames after starting", 0,
+          G_MAXUINT64, DEFAULT_SKIP_FIRST_TIME,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 }
