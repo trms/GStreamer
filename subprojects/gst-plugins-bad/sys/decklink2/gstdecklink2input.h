@@ -61,6 +61,7 @@ HRESULT             gst_decklink2_input_start (GstDeckLink2Input * input,
                                                GstElement * client,
                                                BMDProfileID profile_id,
                                                guint buffer_size,
+                                               GstClockTime skip_first_time,
                                                const GstDeckLink2InputVideoConfig * video_config,
                                                const GstDeckLink2InputAudioConfig * audio_config);
 
