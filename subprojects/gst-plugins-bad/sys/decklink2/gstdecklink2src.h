@@ -33,4 +33,6 @@ GST_ELEMENT_REGISTER_DECLARE (decklink2src);
 
 void gst_decklink2_src_install_properties (GObjectClass * object_class);
 
+void gst_decklink2_src_restart (GstDeckLink2Src * self);
+
 G_END_DECLS
