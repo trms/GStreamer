@@ -384,6 +384,8 @@ struct _GstDeckLink2Input
   gboolean discont;
   gboolean audio_discont;
   gboolean flushing;
+  GstClockTime skip_first_time;
+  GstClockTime start_time;
 
   guint window_size;
   guint window_fill;
@@ -1498,12 +1500,30 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
   if (!clock) {
     GST_WARNING_OBJECT (self,
         "Frame arrived but we dont have configured clock");
-  } else {
-    base_time = gst_element_get_base_time (GST_ELEMENT (self->client));
-    capture_time = gst_clock_get_time (clock);
-    gst_object_unref (clock);
-    if (capture_time >= base_time)
-      capture_time -= base_time;
+    return;
+  }
+
+  base_time = gst_element_get_base_time (GST_ELEMENT (self->client));
+  capture_time = gst_clock_get_time (clock);
+  gst_object_unref (clock);
+  if (capture_time >= base_time)
+    capture_time -= base_time;
+
+  if (!GST_CLOCK_TIME_IS_VALID (self->start_time))
+    self->start_time = capture_time;
+
+  if (GST_CLOCK_TIME_IS_VALID (self->skip_first_time)) {
+    GstClockTime diff = capture_time - self->start_time;
+    if (diff < self->skip_first_time) {
+      GST_DEBUG_OBJECT (self,
+          "Skipping frame as requested: %" GST_TIME_FORMAT " < %"
+          GST_TIME_FORMAT, GST_TIME_ARGS (capture_time),
+          GST_TIME_ARGS (self->skip_first_time + self->start_time));
+      return;
+    }
+
+    GST_DEBUG_OBJECT (self, "All frames were skipped as requested");
+    self->skip_first_time = GST_CLOCK_TIME_NONE;
   }
 
   if (frame) {
@@ -1856,11 +1876,13 @@ gst_decklink2_input_stop_unlocked (GstDeckLink2Input * self)
   gst_clear_caps (&self->selected_video_caps);
   gst_clear_caps (&self->selected_audio_caps);
   priv->signal = false;
+  self->skip_first_time = GST_CLOCK_TIME_NONE;
+  self->start_time = GST_CLOCK_TIME_NONE;
 }
 
 HRESULT
 gst_decklink2_input_start (GstDeckLink2Input * input, GstElement * client,
-    BMDProfileID profile_id, guint buffer_size,
+    BMDProfileID profile_id, guint buffer_size, GstClockTime skip_first_time,
     const GstDeckLink2InputVideoConfig * video_config,
     const GstDeckLink2InputAudioConfig * audio_config)
 {
@@ -1871,6 +1893,9 @@ gst_decklink2_input_start (GstDeckLink2Input * input, GstElement * client,
 
   gst_decklink2_input_stop_unlocked (input);
   gst_decklink2_input_reset_time_mapping (input);
+
+  if (skip_first_time > 0 && GST_CLOCK_TIME_IS_VALID (skip_first_time))
+    input->skip_first_time = skip_first_time;
 
   if (profile_id != bmdProfileDefault) {
     GstDeckLink2Object *object;
