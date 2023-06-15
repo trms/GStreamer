@@ -568,8 +568,8 @@ static GstFlowReturn
 gst_decklink2_src_create (GstPushSrc * src, GstBuffer ** buffer)
 {
   GstDeckLink2Src *self = GST_DECKLINK2_SRC (src);
-  GstSample *sample;
-  GstCaps *caps;
+  GstBuffer *buf = nullptr;
+  GstCaps *caps = nullptr;
   GstFlowReturn ret;
   GstDeckLink2SrcPrivate *priv = self->priv;
   gboolean is_gap_buf = FALSE;
@@ -581,7 +581,7 @@ again:
     return GST_FLOW_ERROR;
   }
 
-  ret = gst_decklink2_input_get_sample (self->input, &sample);
+  ret = gst_decklink2_input_get_data (self->input, &buf, &caps);
   if (ret != GST_FLOW_OK) {
     if (ret == GST_DECKLINK2_INPUT_FLOW_STOPPED) {
       GST_DEBUG_OBJECT (self, "Input was stopped for restarting");
@@ -592,20 +592,22 @@ again:
   }
 
   std::unique_lock < std::mutex > lk (priv->lock);
-  caps = gst_sample_get_caps (sample);
   if (caps && !gst_caps_is_equal (caps, self->selected_caps)) {
     GST_DEBUG_OBJECT (self, "Set updated caps %" GST_PTR_FORMAT, caps);
     gst_caps_replace (&self->selected_caps, caps);
     lk.unlock ();
     if (!gst_pad_set_caps (GST_BASE_SRC_PAD (self), caps)) {
       GST_ERROR_OBJECT (self, "Couldn't set caps");
-      gst_sample_unref (sample);
+      gst_clear_buffer (&buf);
+      gst_clear_caps (&caps);
+
       return GST_FLOW_NOT_NEGOTIATED;
     }
   }
 
-  *buffer = gst_sample_get_buffer (sample);
-  if (GST_BUFFER_FLAG_IS_SET (*buffer, GST_BUFFER_FLAG_GAP))
+  gst_clear_caps (&caps);
+
+  if (GST_BUFFER_FLAG_IS_SET (buf, GST_BUFFER_FLAG_GAP))
     is_gap_buf = TRUE;
 
   if (is_gap_buf != self->is_gap_buf) {
@@ -613,8 +615,7 @@ again:
     g_object_notify (G_OBJECT (self), "signal");
   }
 
-  gst_buffer_ref (*buffer);
-  gst_sample_unref (sample);
+  *buffer = buf;
 
   return GST_FLOW_OK;
 }
