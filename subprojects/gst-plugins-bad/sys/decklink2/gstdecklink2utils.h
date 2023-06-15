@@ -302,11 +302,13 @@ const auto DeleteString = CFRelease;
 
 const auto DlToStdString = [](dlstring_t dl_str) -> std::string
 {
-  std::string returnString("");
-  char stringBuffer[1024];
-  if (CFStringGetCString(dl_str, stringBuffer, 1024, kCFStringEncodingUTF8))
-    returnString = stringBuffer;
-  return returnString;
+  CFIndex len;
+  CFStringGetBytes(dl_str, CFRangeMake(0, CFStringGetLength(dl_str)),
+      kCFStringEncodingUTF8, 0, FALSE, NULL, 0, &len);
+  std::string ret_str (len, '\0');
+  CFStringGetCString (dl_str, &ret_str[0], len, kCFStringEncodingUTF8);
+
+  return ret_str;
 };
 
 const auto StdToDlString = [](std::string std_str) -> dlstring_t
