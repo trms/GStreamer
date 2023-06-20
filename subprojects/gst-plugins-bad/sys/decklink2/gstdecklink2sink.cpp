@@ -68,6 +68,16 @@ enum
 #define DEFAULT_MAX_BUFFERED_FRAMES 14
 #define DEFAULT_AUTO_RESTART        FALSE
 
+enum
+{
+  /* actions */
+  SIGNAL_RESTART,
+
+  SIGNAL_LAST,
+};
+
+static guint gst_decklink2_sink_signals[SIGNAL_LAST] = { 0, };
+
 struct GstDeckLink2SinkPrivate
 {
   std::mutex lock;
@@ -91,6 +101,7 @@ struct _GstDeckLink2Sink
   GstBufferPool *fallback_pool;
   IDeckLinkVideoFrame *prepared_frame;
   BMDVideoOutputFlags output_flags;
+  gboolean schedule_restart;
 
   /* properties */
   BMDDisplayMode display_mode;
@@ -129,6 +140,7 @@ static GstFlowReturn gst_decklink2_sink_prepare (GstBaseSink * sink,
     GstBuffer * buffer);
 static GstFlowReturn gst_decklink2_sink_render (GstBaseSink * sink,
     GstBuffer * buffer);
+static void gst_decklink2_sink_restart (GstDeckLink2Sink * self);
 
 #define gst_decklink2_sink_parent_class parent_class
 G_DEFINE_TYPE (GstDeckLink2Sink, gst_decklink2_sink, GST_TYPE_BASE_SINK);
@@ -234,6 +246,12 @@ gst_decklink2_sink_class_init (GstDeckLink2SinkClass * klass)
           "Restart streaming when frame is dropped, late or underrun happens",
           DEFAULT_AUTO_RESTART,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  gst_decklink2_sink_signals[SIGNAL_RESTART] =
+      g_signal_new_class_handler ("restart", G_TYPE_FROM_CLASS (klass),
+      (GSignalFlags) (G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION),
+      G_CALLBACK (gst_decklink2_sink_restart),
+      NULL, NULL, NULL, G_TYPE_NONE, 0);
 
   GstCaps *templ_caps = gst_decklink2_get_default_template_caps ();
   templ_caps = gst_caps_make_writable (templ_caps);
@@ -657,6 +675,10 @@ gst_decklink2_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
   }
 
   self->configured = TRUE;
+  {
+    std::lock_guard<std::mutex> lk (self->priv->lock);
+    self->schedule_restart = FALSE;
+  }
 
   return TRUE;
 
@@ -770,6 +792,8 @@ gst_decklink2_sink_stop (GstBaseSink * sink)
     gst_clear_object (&self->fallback_pool);
   }
 
+  self->schedule_restart = FALSE;
+
   return TRUE;
 }
 
@@ -871,6 +895,7 @@ static GstFlowReturn
 gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
 {
   GstDeckLink2Sink *self = GST_DECKLINK2_SINK (sink);
+  GstDeckLink2SinkPrivate *priv = self->priv;
   HRESULT hr;
   GstBuffer *audio_buf = NULL;
   GstMapInfo info;
@@ -898,6 +923,26 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
       audio_data_size = info.size;
     } else {
       GST_DEBUG_OBJECT (self, "Received buffer without audio meta");
+    }
+  }
+
+  {
+    std::lock_guard < std::mutex > lk (priv->lock);
+
+    if (self->schedule_restart) {
+      GST_DEBUG_OBJECT (self, "Restarting sink as scheduled");
+      self->schedule_restart = FALSE;
+
+      hr = gst_decklink2_output_configure (self->output, self->n_preroll_frames,
+          self->min_buffered_frames, self->max_buffered_frames,
+          &self->selected_mode, self->output_flags, self->profile_id,
+          self->keyer_mode, (guint8) self->keyer_level, self->mapping_format,
+          self->audio_sample_type, self->audio_channels);
+
+      if (hr != S_OK) {
+        GST_ERROR_OBJECT (self, "Couldn't configure output");
+        return GST_FLOW_OK;
+      }
     }
   }
 
@@ -935,4 +980,14 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
   }
 
   return GST_FLOW_OK;
+}
+
+static void
+gst_decklink2_sink_restart (GstDeckLink2Sink * self)
+{
+  GstDeckLink2SinkPrivate *priv = self->priv;
+  std::lock_guard < std::mutex > lk (priv->lock);
+
+  GST_DEBUG_OBJECT (self, "Schedule restart");
+  self->schedule_restart = TRUE;
 }
