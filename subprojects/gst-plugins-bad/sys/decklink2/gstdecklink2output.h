@@ -65,7 +65,10 @@ IDeckLinkVideoFrame * gst_decklink2_output_upload          (GstDeckLink2Output *
 HRESULT               gst_decklink2_output_schedule_stream  (GstDeckLink2Output * output,
                                                              IDeckLinkVideoFrame * frame,
                                                              guint8 *audio_buf,
-                                                             gsize audio_buf_size);
+                                                             gsize audio_buf_size,
+                                                             guint64 * drop_count,
+                                                             guint64 * late_count,
+                                                             guint64 * underrun_count);
 
 HRESULT               gst_decklink2_output_stop            (GstDeckLink2Output * output);
 

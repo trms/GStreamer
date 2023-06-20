@@ -49,6 +49,7 @@ enum
   PROP_N_PREROLL_FRAMES,
   PROP_MIN_BUFFERED_FRAMES,
   PROP_MAX_BUFFERED_FRAMES,
+  PROP_AUTO_RESTART
 };
 
 #define DEFAULT_MODE                bmdModeUnknown
@@ -65,6 +66,7 @@ enum
 #define DEFAULT_N_PREROLL_FRAMES    7
 #define DEFAULT_MIN_BUFFERED_FRAMES 3
 #define DEFAULT_MAX_BUFFERED_FRAMES 14
+#define DEFAULT_AUTO_RESTART        FALSE
 
 struct GstDeckLink2SinkPrivate
 {
@@ -88,6 +90,7 @@ struct _GstDeckLink2Sink
 
   GstBufferPool *fallback_pool;
   IDeckLinkVideoFrame *prepared_frame;
+  BMDVideoOutputFlags output_flags;
 
   /* properties */
   BMDDisplayMode display_mode;
@@ -104,6 +107,7 @@ struct _GstDeckLink2Sink
   guint n_preroll_frames;
   guint min_buffered_frames;
   guint max_buffered_frames;
+  gboolean auto_restart;
 };
 
 static void gst_decklink2_sink_set_property (GObject * object,
@@ -225,6 +229,12 @@ gst_decklink2_sink_class_init (GstDeckLink2SinkClass * klass)
           "Max number of frames to buffer before dropping",
           0, 16, DEFAULT_MAX_BUFFERED_FRAMES, param_flags));
 
+  g_object_class_install_property (object_class, PROP_AUTO_RESTART,
+      g_param_spec_boolean ("auto-restart", "Auto Restart",
+          "Restart streaming when frame is dropped, late or underrun happens",
+          DEFAULT_AUTO_RESTART,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
   GstCaps *templ_caps = gst_decklink2_get_default_template_caps ();
   templ_caps = gst_caps_make_writable (templ_caps);
 
@@ -296,6 +306,7 @@ gst_decklink2_sink_init (GstDeckLink2Sink * self)
   self->n_preroll_frames = DEFAULT_N_PREROLL_FRAMES;
   self->min_buffered_frames = DEFAULT_MIN_BUFFERED_FRAMES;
   self->max_buffered_frames = DEFAULT_MAX_BUFFERED_FRAMES;
+  self->auto_restart = DEFAULT_AUTO_RESTART;
 
   self->priv = new GstDeckLink2SinkPrivate ();
 }
@@ -362,6 +373,9 @@ gst_decklink2_sink_set_property (GObject * object, guint prop_id,
     case PROP_MAX_BUFFERED_FRAMES:
       self->max_buffered_frames = g_value_get_int (value);
       break;
+    case PROP_AUTO_RESTART:
+      self->auto_restart = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -418,6 +432,9 @@ gst_decklink2_sink_get_property (GObject * object, guint prop_id,
       break;
     case PROP_MAX_BUFFERED_FRAMES:
       g_value_set_int (value, self->max_buffered_frames);
+      break;
+    case PROP_AUTO_RESTART:
+      g_value_set_boolean (value, self->auto_restart);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -592,16 +609,17 @@ gst_decklink2_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
    * Note that this flag will have no effect in practice if the video stream
    * does not contain timecode metadata.
    */
-  BMDVideoOutputFlags output_flags;
   if (self->timecode_format == bmdTimecodeVITC ||
       self->timecode_format == bmdTimecodeVITCField2) {
-    output_flags = bmdVideoOutputVITC;
+    self->output_flags = bmdVideoOutputVITC;
   } else {
-    output_flags = bmdVideoOutputRP188;
+    self->output_flags = bmdVideoOutputRP188;
   }
 
-  if (self->caption_line > 0 || self->afd_bar_line > 0)
-    output_flags = (BMDVideoOutputFlags) (output_flags | bmdVideoOutputVANC);
+  if (self->caption_line > 0 || self->afd_bar_line > 0) {
+    self->output_flags = (BMDVideoOutputFlags)
+        (self->output_flags | bmdVideoOutputVANC);
+  }
 
   GST_DEBUG_OBJECT (self, "Configuring output, mode %" GST_FOURCC_FORMAT
       ", audio-sample-type %d, audio-channles %d",
@@ -610,8 +628,8 @@ gst_decklink2_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
 
   hr = gst_decklink2_output_configure (self->output, self->n_preroll_frames,
       self->min_buffered_frames, self->max_buffered_frames,
-      &self->selected_mode, output_flags, self->profile_id, self->keyer_mode,
-      (guint8) self->keyer_level, self->mapping_format,
+      &self->selected_mode, self->output_flags, self->profile_id,
+      self->keyer_mode, (guint8) self->keyer_level, self->mapping_format,
       self->audio_sample_type, self->audio_channels);
   if (hr != S_OK) {
     GST_ERROR_OBJECT (self, "Couldn't configure output");
@@ -858,6 +876,7 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
   GstMapInfo info;
   guint8 *audio_data = NULL;
   gsize audio_data_size = 0;
+  guint64 drop_count, late_count, underrun_count;
 
   if (!self->prepared_frame) {
     GST_ERROR_OBJECT (self, "No prepared frame");
@@ -886,7 +905,8 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
       G_GSIZE_FORMAT, self->prepared_frame, audio_data_size);
 
   hr = gst_decklink2_output_schedule_stream (self->output,
-      self->prepared_frame, audio_data, audio_data_size);
+      self->prepared_frame, audio_data, audio_data_size, &drop_count,
+      &late_count, &underrun_count);
 
   if (audio_buf)
     gst_buffer_unmap (audio_buf, &info);
@@ -895,6 +915,23 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
     GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
         ("Failed to schedule frame: 0x%x", (guint) hr));
     return GST_FLOW_ERROR;
+  }
+
+  if (self->auto_restart && (drop_count || late_count || underrun_count)) {
+    GST_WARNING_OBJECT (self, "Restart output, drop count: %" G_GUINT64_FORMAT
+        ", late cout: %" G_GUINT64_FORMAT ", %" G_GUINT64_FORMAT,
+        drop_count, late_count, underrun_count);
+
+    hr = gst_decklink2_output_configure (self->output, self->n_preroll_frames,
+        self->min_buffered_frames, self->max_buffered_frames,
+        &self->selected_mode, self->output_flags, self->profile_id,
+        self->keyer_mode, (guint8) self->keyer_level, self->mapping_format,
+        self->audio_sample_type, self->audio_channels);
+
+    if (hr != S_OK) {
+      GST_ERROR_OBJECT (self, "Couldn't configure output");
+      return GST_FLOW_OK;
+    }
   }
 
   return GST_FLOW_OK;

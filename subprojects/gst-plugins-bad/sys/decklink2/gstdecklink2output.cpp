@@ -149,8 +149,7 @@ public:
 
     buffer_.resize (cur_size + num_samples);
     if (cur_size > 0) {
-      memmove (&buffer_[0] + silence_length_in_bytes, &buffer_[0],
-          cur_size);
+      memmove (&buffer_[0] + silence_length_in_bytes, &buffer_[0], cur_size);
     }
 
     gst_audio_format_info_fill_silence (info_.finfo, &buffer_[0],
@@ -234,12 +233,16 @@ struct _GstDeckLink2Output
 
   gboolean configured;
   gboolean prerolled;
+  guint64 late_count;
+  guint64 drop_count;
+  guint64 underrun_count;
 };
 
 static void gst_decklink2_output_dispose (GObject * object);
 static void gst_decklink2_output_finalize (GObject * object);
 static void gst_decklink2_output_on_stopped (GstDeckLink2Output * self);
-static void gst_decklink2_output_on_completed (GstDeckLink2Output * self);
+static void gst_decklink2_output_on_completed (GstDeckLink2Output * self,
+    BMDOutputFrameCompletionResult result);
 
 #define gst_decklink2_output_parent_class parent_class
 G_DEFINE_TYPE (GstDeckLink2Output, gst_decklink2_output, GST_TYPE_OBJECT);
@@ -308,8 +311,9 @@ public:
     }
 
     if (result == bmdOutputFrameCompleted ||
-        result == bmdOutputFrameDisplayedLate) {
-      gst_decklink2_output_on_completed (output_);
+        result == bmdOutputFrameDisplayedLate ||
+        result == bmdOutputFrameDropped) {
+      gst_decklink2_output_on_completed (output_, result);
     }
 
     return S_OK;
@@ -1013,7 +1017,8 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
 
 HRESULT
 gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
-    IDeckLinkVideoFrame * frame, guint8 * audio_buf, gsize audio_buf_size)
+    IDeckLinkVideoFrame * frame, guint8 * audio_buf, gsize audio_buf_size,
+    guint64 * drop_count, guint64 * late_count, guint64 * underrun_count)
 {
   GstDeckLink2OutputPrivate *priv = output->priv;
   HRESULT hr;
@@ -1021,6 +1026,10 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
   dlbool_t active;
 
   g_assert (output->configured);
+
+  *drop_count = 0;
+  *late_count = 0;
+  *underrun_count = 0;
 
   hr = gst_decklink2_output_is_running (output, &active);
   if (!gst_decklink2_result (hr)) {
@@ -1056,7 +1065,12 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
   std::lock_guard < std::mutex > slk (priv->schedule_lock);
   priv->audio_buf.Append (audio_buf, audio_buf_size);
 
-  return gst_decklink2_output_schedule_video_internal (output, frame);
+  hr = gst_decklink2_output_schedule_video_internal (output, frame);
+  *drop_count = output->drop_count;
+  *late_count = output->late_count;
+  *underrun_count = output->underrun_count;
+
+  return hr;
 }
 
 static HRESULT
@@ -1094,6 +1108,10 @@ gst_decklink2_output_stop_internal (GstDeckLink2Output * self)
   gst_decklink2_output_disable_video (self);
   gst_decklink2_output_set_video_callback (self, NULL);
   self->configured = FALSE;
+  self->prerolled = FALSE;
+  self->late_count = 0;
+  self->drop_count = 0;
+  self->underrun_count = 0;
 
   return hr;
 }
@@ -1934,6 +1952,9 @@ gst_decklink2_output_configure (GstDeckLink2Output * output,
   output->cdp_hdr_sequence_cntr = 0;
   output->configured = TRUE;
   output->pts = 0;
+  output->drop_count = 0;
+  output->late_count = 0;
+  output->underrun_count = 0;
 
   return S_OK;
 
@@ -1951,13 +1972,19 @@ gst_decklink2_output_on_stopped (GstDeckLink2Output * self)
 }
 
 static void
-gst_decklink2_output_on_completed (GstDeckLink2Output * self)
+gst_decklink2_output_on_completed (GstDeckLink2Output * self,
+    BMDOutputFrameCompletionResult result)
 {
   GstDeckLink2OutputPrivate *priv = self->priv;
   dlbool_t active;
   guint32 count = 0;
 
   std::lock_guard < std::mutex > lk (priv->schedule_lock);
+  if (result == bmdOutputFrameDisplayedLate)
+    self->late_count++;
+  else if (result == bmdOutputFrameDropped)
+    self->drop_count++;
+
   if (!self->last_frame)
     return;
 
@@ -1966,6 +1993,7 @@ gst_decklink2_output_on_completed (GstDeckLink2Output * self)
     hr = gst_decklink2_output_get_num_bufferred (self, &count);
     if (gst_decklink2_result (hr) && count <= self->min_buffered) {
       GST_WARNING_OBJECT (self, "Underrun, buffered count %u", count);
+      self->underrun_count++;
       priv->audio_buf.PrependSilence ();
       gst_decklink2_output_schedule_video_internal (self, self->last_frame);
     }
