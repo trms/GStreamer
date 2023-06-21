@@ -74,7 +74,9 @@ void                gst_decklink2_input_set_flushing (GstDeckLink2Input * input,
 
 GstFlowReturn       gst_decklink2_input_get_data (GstDeckLink2Input * input,
                                                   GstBuffer ** buffer,
-                                                  GstCaps ** caps);
+                                                  GstCaps ** caps,
+                                                  GstClockTimeDiff * av_sync,
+                                                  guint * no_signal_count);
 
 gboolean            gst_decklink2_input_has_signal (GstDeckLink2Input * input);
 
