@@ -676,7 +676,7 @@ gst_decklink2_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
 
   self->configured = TRUE;
   {
-    std::lock_guard<std::mutex> lk (self->priv->lock);
+    std::lock_guard < std::mutex > lk (self->priv->lock);
     self->schedule_restart = FALSE;
   }
 
