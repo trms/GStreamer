@@ -914,6 +914,7 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
   GstClockTime next_pts, dur;
   HRESULT hr = E_FAIL;
   guint num_samples;
+  guint num_written;
   guint8 *audio_buf;
 
   frame->AddRef ();
@@ -967,15 +968,22 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
     }
 
     if (audio_buf && num_samples > 0) {
-      hr = gst_decklink2_output_schedule_audio_samples (self,
-          audio_buf, num_samples, 0, 0, NULL);
-      priv->audio_buf.Flush ();
+      while (num_samples > 0) {
+        num_written = 0;
+        hr = gst_decklink2_output_schedule_audio_samples (self,
+            audio_buf, num_samples, 0, 0, &num_written);
 
-      if (!gst_decklink2_result (hr)) {
-        GST_ERROR_OBJECT (self, "Couldn't schedule audio sample, hr: 0x%x",
-            (guint) hr);
-        return hr;
+        if (!gst_decklink2_result (hr)) {
+          GST_ERROR_OBJECT (self, "Couldn't schedule audio sample, hr: 0x%x",
+              (guint) hr);
+          return hr;
+        }
+
+        num_samples -= num_written;
+        audio_buf += num_written * self->audio_info.bpf;
       }
+
+      priv->audio_buf.Flush ();
     }
 
     self->n_prerolled++;
@@ -1001,15 +1009,22 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
       self->prerolled = TRUE;
     }
   } else if (audio_buf && num_samples > 0) {
-    hr = gst_decklink2_output_schedule_audio_samples (self,
-        audio_buf, num_samples, 0, 0, NULL);
-    priv->audio_buf.Flush ();
+    while (num_samples > 0) {
+      num_written = 0;
+      hr = gst_decklink2_output_schedule_audio_samples (self,
+          audio_buf, num_samples, 0, 0, &num_written);
 
-    if (!gst_decklink2_result (hr)) {
-      GST_ERROR_OBJECT (self, "Couldn't schedule audio sample, hr: 0x%x",
-          (guint) hr);
-      return hr;
+      if (!gst_decklink2_result (hr)) {
+        GST_ERROR_OBJECT (self, "Couldn't schedule audio sample, hr: 0x%x",
+            (guint) hr);
+        return hr;
+      }
+
+      num_samples -= num_written;
+      audio_buf += num_written * self->audio_info.bpf;
     }
+
+    priv->audio_buf.Flush ();
   }
 
   return S_OK;
