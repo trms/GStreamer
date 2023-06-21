@@ -395,6 +395,8 @@ struct _GstDeckLink2Input
   gboolean started;
   GstClockTime skip_first_time;
   GstClockTime start_time;
+  guint no_signal_count;
+  GstClockTimeDiff av_sync;
 
   guint window_size;
   guint window_fill;
@@ -1126,6 +1128,8 @@ gst_decklink2_input_on_format_changed (GstDeckLink2Input * self,
   gst_adapter_clear (self->audio_buf);
   self->audio_offset = INVALID_AUDIO_OFFSET;
   self->next_audio_offset = INVALID_AUDIO_OFFSET;
+  self->no_signal_count = 0;
+  self->av_sync = 0;
 
   gst_decklink2_input_reset_time_mapping (self);
   gst_decklink2_input_start_streams (self);
@@ -1600,9 +1604,12 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     flags = frame->GetFlags ();
     if ((flags & bmdFrameHasNoInputSource) != 0) {
       GST_BUFFER_FLAG_SET (buffer, GST_BUFFER_FLAG_GAP);
+      GST_DEBUG_OBJECT (self, "No signal");
       priv->signal = false;
+      self->no_signal_count++;
     } else {
       priv->signal = true;
+      self->no_signal_count = 0;
 
       if (self->output_cc || self->output_afd_bar) {
         extract_vbi (self, buffer, frame);
@@ -1840,27 +1847,9 @@ out:
       gst_buffer_add_decklink2_audio_meta (buffer, sample);
       gst_sample_unref (sample);
 
-      /* FIXME: make configurable? */
       if (frame && packet) {
-        GstClockTime diff = 0;
-        /* Video PTS are calibrated but not for audio to make audio pts
-         * and duration perfect. Then audio/video may be out of sync.
-         * Determine resync if large gap is detected */
-        if (GST_BUFFER_PTS (buffer) >= GST_BUFFER_PTS (audio_buf))
-          diff = GST_BUFFER_PTS (buffer) - GST_BUFFER_PTS (audio_buf);
-        else
-          diff = GST_BUFFER_PTS (audio_buf) - GST_BUFFER_PTS (buffer);
-
-        if (diff > 250 * GST_MSECOND) {
-          GST_WARNING_OBJECT (self, "Large gap detected %" GST_TIME_FORMAT
-              ", video pts %" GST_TIME_FORMAT ", audio pts %" GST_TIME_FORMAT
-              ", do resync", GST_TIME_ARGS (diff),
-              GST_TIME_ARGS (GST_BUFFER_PTS (buffer)),
-              GST_TIME_ARGS (GST_BUFFER_PTS (audio_buf)));
-          self->audio_offset = INVALID_AUDIO_OFFSET;
-          self->next_audio_offset = INVALID_AUDIO_OFFSET;
-          self->audio_discont = TRUE;
-        }
+        self->av_sync = GST_CLOCK_DIFF (GST_BUFFER_PTS (buffer),
+            GST_BUFFER_PTS (audio_buf));
       }
 
       gst_buffer_unref (audio_buf);
@@ -1892,6 +1881,8 @@ gst_decklink2_input_stop_unlocked (GstDeckLink2Input * self)
   self->skip_first_time = GST_CLOCK_TIME_NONE;
   self->start_time = GST_CLOCK_TIME_NONE;
   self->started = FALSE;
+  self->no_signal_count = 0;
+  self->av_sync = 0;
 }
 
 HRESULT
@@ -2097,7 +2088,7 @@ gst_decklink2_input_set_flushing (GstDeckLink2Input * input, gboolean flush)
 
 GstFlowReturn
 gst_decklink2_input_get_data (GstDeckLink2Input * input, GstBuffer ** buf,
-    GstCaps ** caps)
+    GstCaps ** caps, GstClockTimeDiff * av_sync, guint * no_signal_count)
 {
   GstDeckLink2InputPrivate *priv = input->priv;
   std::unique_lock < std::mutex > lk (priv->lock);
@@ -2105,6 +2096,8 @@ gst_decklink2_input_get_data (GstDeckLink2Input * input, GstBuffer ** buf,
 
   *buf = nullptr;
   *caps = nullptr;
+  *av_sync = 0;
+  *no_signal_count = 0;
 
   while (gst_queue_array_is_empty (input->queue)
       && !input->flushing && input->started) {
@@ -2121,6 +2114,8 @@ gst_decklink2_input_get_data (GstDeckLink2Input * input, GstBuffer ** buf,
       gst_queue_array_pop_head_struct (input->queue);
   *buf = data->buffer;
   *caps = data->caps;
+  *av_sync = input->av_sync;
+  *no_signal_count = input->no_signal_count;
 
   return GST_FLOW_OK;
 }
