@@ -337,11 +337,13 @@ struct GstDeckLink2InputPrivate
   GstDeckLink2InputPrivate ()
   {
     signal = false;
+    was_restarted = false;
   }
 
   std::mutex lock;
   std::condition_variable cond;
   std::atomic < bool >signal;
+  std::atomic < bool >was_restarted;
 };
 
 struct _GstDeckLink2Input
@@ -395,7 +397,6 @@ struct _GstDeckLink2Input
   gboolean started;
   GstClockTime skip_first_time;
   GstClockTime start_time;
-  guint no_signal_count;
   GstClockTimeDiff av_sync;
 
   guint window_size;
@@ -1075,6 +1076,7 @@ gst_decklink2_input_on_format_changed (GstDeckLink2Input * self,
   BMDDisplayMode display_mode = mode->GetDisplayMode ();
   GstDeckLink2DisplayMode new_mode;
   GstCaps *caps;
+  GstDeckLink2InputPrivate *priv = self->priv;
 
   GST_DEBUG_OBJECT (self, "format changed, flags 0x%x", flags);
 
@@ -1128,8 +1130,8 @@ gst_decklink2_input_on_format_changed (GstDeckLink2Input * self,
   gst_adapter_clear (self->audio_buf);
   self->audio_offset = INVALID_AUDIO_OFFSET;
   self->next_audio_offset = INVALID_AUDIO_OFFSET;
-  self->no_signal_count = 0;
   self->av_sync = 0;
+  priv->was_restarted = true;
 
   gst_decklink2_input_reset_time_mapping (self);
   gst_decklink2_input_start_streams (self);
@@ -1510,6 +1512,34 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
   BMDTimeValue hw_now, dummy, dummy2;
   BMDTimeValue stream_time = GST_CLOCK_TIME_NONE;
   BMDTimeValue stream_dur;
+  BMDFrameFlags flags = bmdFrameFlagDefault;
+
+  if (frame) {
+    if (priv->was_restarted) {
+      /* Ignores no-signal flag of the first frame after we do restart */
+      priv->was_restarted = false;
+    } else {
+      flags = frame->GetFlags ();
+      if ((flags & bmdFrameHasNoInputSource) != 0) {
+        GST_DEBUG_OBJECT (self, "No signal");
+        priv->signal = false;
+      } else if (!priv->signal) {
+        GST_INFO_OBJECT (self, "Got first frame, reset timing map");
+        priv->signal = true;
+        priv->was_restarted = true;
+        gst_decklink2_input_reset_time_mapping (self);
+        gst_decklink2_input_stop_streams (self);
+        gst_decklink2_input_flush_streams (self);
+        gst_decklink2_input_start_streams (self);
+        gst_adapter_clear (self->audio_buf);
+        self->audio_offset = INVALID_AUDIO_OFFSET;
+        self->next_audio_offset = INVALID_AUDIO_OFFSET;
+        return;
+      } else {
+        priv->signal = true;
+      }
+    }
+  }
 
   std::unique_lock < std::mutex > lk (priv->lock);
   hr = gst_decklink2_input_get_reference_clock (self, GST_SECOND,
@@ -1554,7 +1584,6 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
   if (frame) {
     void *frame_data;
     gsize frame_size;
-    BMDFrameFlags flags;
     BMDTimeValue frame_time, frame_dur;
     IDeckLinkTimecode *timecode = NULL;
     GstClockTime pts, dur;
@@ -1601,16 +1630,10 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
       dur = GST_CLOCK_TIME_NONE;
     }
 
-    flags = frame->GetFlags ();
-    if ((flags & bmdFrameHasNoInputSource) != 0) {
+    if (!priv->signal) {
       GST_BUFFER_FLAG_SET (buffer, GST_BUFFER_FLAG_GAP);
       GST_DEBUG_OBJECT (self, "No signal");
-      priv->signal = false;
-      self->no_signal_count++;
     } else {
-      priv->signal = true;
-      self->no_signal_count = 0;
-
       if (self->output_cc || self->output_afd_bar) {
         extract_vbi (self, buffer, frame);
 
@@ -1878,10 +1901,10 @@ gst_decklink2_input_stop_unlocked (GstDeckLink2Input * self)
   gst_clear_caps (&self->selected_video_caps);
   gst_clear_caps (&self->selected_audio_caps);
   priv->signal = false;
+  priv->was_restarted = false;
   self->skip_first_time = GST_CLOCK_TIME_NONE;
   self->start_time = GST_CLOCK_TIME_NONE;
   self->started = FALSE;
-  self->no_signal_count = 0;
   self->av_sync = 0;
 }
 
@@ -2088,7 +2111,7 @@ gst_decklink2_input_set_flushing (GstDeckLink2Input * input, gboolean flush)
 
 GstFlowReturn
 gst_decklink2_input_get_data (GstDeckLink2Input * input, GstBuffer ** buf,
-    GstCaps ** caps, GstClockTimeDiff * av_sync, guint * no_signal_count)
+    GstCaps ** caps, GstClockTimeDiff * av_sync)
 {
   GstDeckLink2InputPrivate *priv = input->priv;
   std::unique_lock < std::mutex > lk (priv->lock);
@@ -2097,7 +2120,6 @@ gst_decklink2_input_get_data (GstDeckLink2Input * input, GstBuffer ** buf,
   *buf = nullptr;
   *caps = nullptr;
   *av_sync = 0;
-  *no_signal_count = 0;
 
   while (gst_queue_array_is_empty (input->queue)
       && !input->flushing && input->started) {
@@ -2115,7 +2137,6 @@ gst_decklink2_input_get_data (GstDeckLink2Input * input, GstBuffer ** buf,
   *buf = data->buffer;
   *caps = data->caps;
   *av_sync = input->av_sync;
-  *no_signal_count = input->no_signal_count;
 
   return GST_FLOW_OK;
 }
