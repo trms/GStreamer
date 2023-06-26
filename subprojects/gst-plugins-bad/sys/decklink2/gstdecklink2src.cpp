@@ -50,7 +50,6 @@ enum
   PROP_SIGNAL,
   PROP_SKIP_FIRST_TIME,
   PROP_DESYNC_THRESHOLD,
-  PROP_NO_SIGNAL_THRESHOLD,
 };
 
 #define DEFAULT_MODE                bmdModeUnknown
@@ -67,7 +66,6 @@ enum
 #define DEFAULT_AUDIO_CHANNELS      GST_DECKLINK2_AUDIO_CHANNELS_2
 #define DEFAULT_SKIP_FIRST_TIME     0
 #define DEFAULT_DESYNC_THRESHOLD    (250 * GST_MSECOND)
-#define DEFAULT_NO_SIGNAL_THRESHOLD (10)
 
 enum
 {
@@ -114,7 +112,6 @@ struct _GstDeckLink2Src
   guint buffer_size;
   GstClockTime skip_first_time;
   GstClockTime desync_threshold;
-  guint no_signal_threshold;
 };
 
 static void gst_decklink2_src_finalize (GObject * object);
@@ -213,7 +210,6 @@ gst_decklink2_src_init (GstDeckLink2Src * self)
   self->buffer_size = DEFAULT_BUFFER_SIZE;
   self->is_gap_buf = FALSE;
   self->desync_threshold = DEFAULT_DESYNC_THRESHOLD;
-  self->no_signal_threshold = DEFAULT_NO_SIGNAL_THRESHOLD;
 
   self->priv = new GstDeckLink2SrcPrivate ();
 
@@ -283,9 +279,6 @@ gst_decklink2_src_set_property (GObject * object, guint prop_id,
     case PROP_DESYNC_THRESHOLD:
       self->desync_threshold = g_value_get_uint64 (value);
       break;
-    case PROP_NO_SIGNAL_THRESHOLD:
-      self->no_signal_threshold = g_value_get_uint (value);
-      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -351,9 +344,6 @@ gst_decklink2_src_get_property (GObject * object, guint prop_id, GValue * value,
       break;
     case PROP_DESYNC_THRESHOLD:
       g_value_set_uint64 (value, self->desync_threshold);
-      break;
-    case PROP_NO_SIGNAL_THRESHOLD:
-      g_value_set_uint (value, self->no_signal_threshold);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -601,7 +591,6 @@ gst_decklink2_src_create (GstPushSrc * src, GstBuffer ** buffer)
   GstDeckLink2SrcPrivate *priv = self->priv;
   gboolean is_gap_buf = FALSE;
   GstClockTimeDiff av_sync;
-  guint no_signal_count;
 
 again:
   if (!gst_decklink2_src_run (self)) {
@@ -610,8 +599,7 @@ again:
     return GST_FLOW_ERROR;
   }
 
-  ret = gst_decklink2_input_get_data (self->input, &buf, &caps, &av_sync,
-      &no_signal_count);
+  ret = gst_decklink2_input_get_data (self->input, &buf, &caps, &av_sync);
   if (ret != GST_FLOW_OK) {
     if (ret == GST_DECKLINK2_INPUT_FLOW_STOPPED) {
       GST_DEBUG_OBJECT (self, "Input was stopped for restarting");
@@ -669,18 +657,6 @@ again:
         GST_ERROR_OBJECT (self, "Couldn't restart input");
         return GST_FLOW_ERROR;
       }
-    }
-  }
-
-  if (self->no_signal_threshold != 0 &&
-      no_signal_count >= self->no_signal_threshold) {
-    GST_DEBUG_OBJECT (self, "No signal count %u, restarting", no_signal_count);
-
-    self->running = FALSE;
-    gst_decklink2_input_stop (self->input);
-    if (!gst_decklink2_src_run_unlocked (self, TRUE)) {
-      GST_ERROR_OBJECT (self, "Couldn't restart input");
-      return GST_FLOW_ERROR;
     }
   }
 
@@ -784,14 +760,6 @@ gst_decklink2_src_install_properties (GObjectClass * object_class)
           "If larger desync is detected, streaming will be restarted "
           "(0 = disable auto-restart)", 0,
           G_MAXUINT64, DEFAULT_DESYNC_THRESHOLD,
-          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
-
-  g_object_class_install_property (object_class, PROP_NO_SIGNAL_THRESHOLD,
-      g_param_spec_uint ("no-signal-threshold", "No Signal Threshold",
-          "Maximum allowed consecutive no-signal threshold. "
-          "If larger number of consecutive no-signal frames is detected, "
-          "streaming will be restarted (0 = disable auto-restart)", 0,
-          G_MAXINT32, DEFAULT_NO_SIGNAL_THRESHOLD,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 }
 
