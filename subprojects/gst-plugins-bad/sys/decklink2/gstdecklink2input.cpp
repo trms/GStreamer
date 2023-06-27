@@ -1515,16 +1515,24 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
   BMDFrameFlags flags = bmdFrameFlagDefault;
 
   if (frame) {
+    gboolean has_signal;
+    flags = frame->GetFlags ();
+
+    if ((flags & bmdFrameHasNoInputSource) != 0)
+      has_signal = FALSE;
+    else
+      has_signal = TRUE;
+
+    GST_TRACE_OBJECT (self, "Frame has signal: %d", has_signal);
+
     if (priv->was_restarted) {
       /* Ignores no-signal flag of the first frame after we do restart */
       priv->was_restarted = false;
     } else {
-      flags = frame->GetFlags ();
-      if ((flags & bmdFrameHasNoInputSource) != 0) {
-        GST_DEBUG_OBJECT (self, "No signal");
+      if (!has_signal) {
         priv->signal = false;
       } else if (!priv->signal) {
-        GST_INFO_OBJECT (self, "Got first frame, reset timing map");
+        GST_LOG_OBJECT (self, "Got first frame, reset timing map");
         priv->signal = true;
         priv->was_restarted = true;
         gst_decklink2_input_reset_time_mapping (self);
@@ -1632,7 +1640,6 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
 
     if (!priv->signal) {
       GST_BUFFER_FLAG_SET (buffer, GST_BUFFER_FLAG_GAP);
-      GST_DEBUG_OBJECT (self, "No signal");
     } else {
       if (self->output_cc || self->output_afd_bar) {
         extract_vbi (self, buffer, frame);
