@@ -1099,6 +1099,7 @@ gst_decklink2_output_stop_internal (GstDeckLink2Output * self)
   std::unique_lock < std::mutex > lk (priv->schedule_lock);
   /* Steal last frame to avoid re-rendering */
   GST_DECKLINK2_CLEAR_COM (self->last_frame);
+  lk.unlock ();
 
   switch (self->api_level) {
     case GST_DECKLINK2_API_LEVEL_10_11:
@@ -1115,7 +1116,6 @@ gst_decklink2_output_stop_internal (GstDeckLink2Output * self)
       g_assert_not_reached ();
       break;
   }
-  lk.unlock ();
 
   GST_DEBUG_OBJECT (self, "StopScheduledPlayback result 0x%x", (guint) hr);
 
