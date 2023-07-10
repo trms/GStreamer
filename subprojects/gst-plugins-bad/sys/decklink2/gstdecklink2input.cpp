@@ -1803,34 +1803,14 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
       GST_WARNING_OBJECT (self, "Expected offset %" G_GUINT64_FORMAT
           ", received %" G_GUINT64_FORMAT, self->next_audio_offset,
           audio_offset);
-      self->audio_discont = TRUE;
-
-      if (self->next_audio_offset > audio_offset) {
-        gsize trim = self->next_audio_offset - audio_offset;
-        gsize count;
-
-        if (trim >= (gsize) sample_count) {
-          GST_WARNING_OBJECT (self, "Complately backward audio pts");
-          gst_buffer_unref (audio_buf);
-          goto out;
-        }
-
-        count = sample_count - trim;
-        audio_buf = gst_audio_buffer_truncate (audio_buf, self->audio_info.bpf,
-            trim, count);
-        self->next_audio_offset += count;
-      } else {
-        GstBuffer *silence;
-        gsize diff = audio_offset - self->next_audio_offset;
-
-        silence = gst_buffer_new_and_alloc (diff * self->audio_info.bpf);
-        gst_buffer_map (silence, &map, GST_MAP_WRITE);
-        gst_audio_format_info_fill_silence (self->audio_info.finfo,
-            map.data, map.size);
-        gst_buffer_unmap (silence, &map);
-        gst_adapter_push (self->audio_buf, silence);
-        self->next_audio_offset += sample_count + diff;
-      }
+      gst_decklink2_input_reset_time_mapping (self);
+      gst_decklink2_input_stop_streams (self);
+      gst_decklink2_input_flush_streams (self);
+      gst_decklink2_input_start_streams (self);
+      gst_adapter_clear (self->audio_buf);
+      self->audio_offset = INVALID_AUDIO_OFFSET;
+      self->next_audio_offset = INVALID_AUDIO_OFFSET;
+      return;
     } else {
       GST_LOG_OBJECT (self, "Got expected audio samples");
       self->next_audio_offset += sample_count;
