@@ -55,6 +55,9 @@ struct _GstDeckLink2Combiner
 
   GstClockTime video_running_time;
   GstClockTime audio_running_time;
+
+  guint64 num_video_buffers;
+  guint64 num_audio_buffers;
 };
 
 static void gst_decklink2_combiner_dispose (GObject * object);
@@ -376,6 +379,8 @@ gst_decklink2_combiner_reset (GstDeckLink2Combiner * self)
   self->audio_start_time = GST_CLOCK_TIME_NONE;
   self->video_running_time = GST_CLOCK_TIME_NONE;
   self->audio_running_time = GST_CLOCK_TIME_NONE;
+  self->num_video_buffers = 0;
+  self->num_audio_buffers = 0;
 }
 
 static gboolean
@@ -621,12 +626,16 @@ gst_decklink2_combiner_aggregate (GstAggregator * agg, gboolean timeout)
             (GstBuffer *) g_steal_pointer (&audio_buf));
         gst_aggregator_pad_drop_buffer (self->audio_pad);
       }
+
+      self->num_audio_buffers++;
     } else {
       GST_LOG_OBJECT (self, "Pushing audio buffer to adapter, %" GST_PTR_FORMAT,
           audio_buf);
       gst_adapter_push (self->audio_buffers,
           (GstBuffer *) g_steal_pointer (&audio_buf));
       gst_aggregator_pad_drop_buffer (self->audio_pad);
+
+      self->num_audio_buffers++;
     }
   }
 
@@ -644,6 +653,7 @@ gst_decklink2_combiner_aggregate (GstAggregator * agg, gboolean timeout)
 
   gst_aggregator_pad_drop_buffer (self->video_pad);
   video_buf = gst_buffer_make_writable (video_buf);
+  self->num_video_buffers++;
 
   /* Remove external audio meta if any */
   meta = gst_buffer_get_decklink2_audio_meta (video_buf);
@@ -669,7 +679,12 @@ gst_decklink2_combiner_aggregate (GstAggregator * agg, gboolean timeout)
     GST_LOG_OBJECT (self, "No audio meta");
   }
 
-  GST_LOG_OBJECT (self, "Finish buffer %" GST_PTR_FORMAT, video_buf);
+  GST_LOG_OBJECT (self, "Finish buffer %" GST_PTR_FORMAT
+      ", total video/audio buffers %" GST_TIME_FORMAT
+      " (%" G_GUINT64_FORMAT ") / %" GST_TIME_FORMAT " (%"
+      G_GUINT64_FORMAT ")", video_buf, GST_TIME_ARGS (self->video_running_time),
+      self->num_video_buffers, GST_TIME_ARGS (self->audio_running_time),
+      self->num_audio_buffers);
 
   GST_AGGREGATOR_PAD (agg->srcpad)->segment.position = self->video_running_time;
 
