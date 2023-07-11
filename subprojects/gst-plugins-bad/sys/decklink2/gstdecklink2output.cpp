@@ -147,7 +147,7 @@ public:
     size_t silence_length_in_bytes = num_samples * info_.bpf;
     size_t cur_size = buffer_.size ();
 
-    buffer_.resize (cur_size + num_samples);
+    buffer_.resize (cur_size + silence_length_in_bytes);
     if (cur_size > 0) {
       memmove (&buffer_[0] + silence_length_in_bytes, &buffer_[0], cur_size);
     }
@@ -226,10 +226,12 @@ struct _GstDeckLink2Output
   guint16 cdp_hdr_sequence_cntr;
   guint n_prerolled;
   guint64 n_frames;
+  guint64 n_samples;
   guint n_preroll_frames;
   guint min_buffered;
   guint max_buffered;
   GstClockTime pts;
+  BMDTimeValue hw_time;
 
   gboolean configured;
   gboolean prerolled;
@@ -856,7 +858,7 @@ gst_decklink2_output_is_running (GstDeckLink2Output * self, dlbool_t * active)
 }
 
 static HRESULT
-gst_decklink2_output_get_num_bufferred (GstDeckLink2Output * self,
+gst_decklink2_output_get_num_buffered (GstDeckLink2Output * self,
     guint32 * count)
 {
   HRESULT hr = E_FAIL;
@@ -871,6 +873,60 @@ gst_decklink2_output_get_num_bufferred (GstDeckLink2Output * self,
     case GST_DECKLINK2_API_LEVEL_11_5_1:
     case GST_DECKLINK2_API_LEVEL_LATEST:
       hr = self->output->GetBufferedVideoFrameCount (count);
+      break;
+    default:
+      g_assert_not_reached ();
+      break;
+  }
+
+  return hr;
+}
+
+static HRESULT
+gst_decklink2_output_get_num_buffered_audio (GstDeckLink2Output * self,
+    guint32 * count)
+{
+  HRESULT hr = E_FAIL;
+
+  switch (self->api_level) {
+    case GST_DECKLINK2_API_LEVEL_10_11:
+      hr = self->output_10_11->GetBufferedAudioSampleFrameCount (count);
+      break;
+    case GST_DECKLINK2_API_LEVEL_11_4:
+      hr = self->output_11_4->GetBufferedAudioSampleFrameCount (count);
+      break;
+    case GST_DECKLINK2_API_LEVEL_11_5_1:
+    case GST_DECKLINK2_API_LEVEL_LATEST:
+      hr = self->output->GetBufferedAudioSampleFrameCount (count);
+      break;
+    default:
+      g_assert_not_reached ();
+      break;
+  }
+
+  return hr;
+}
+
+static HRESULT
+gst_decklink2_output_get_reference_clock (GstDeckLink2Output * self,
+    BMDTimeScale scale, BMDTimeValue * hw_time, BMDTimeValue * time_in_frame,
+    BMDTimeValue * ticks_per_frame)
+{
+  HRESULT hr = E_FAIL;
+
+  switch (self->api_level) {
+    case GST_DECKLINK2_API_LEVEL_10_11:
+      hr = self->output_10_11->GetHardwareReferenceClock (scale,
+          hw_time, time_in_frame, ticks_per_frame);
+      break;
+    case GST_DECKLINK2_API_LEVEL_11_4:
+      hr = self->output_11_4->GetHardwareReferenceClock (scale,
+          hw_time, time_in_frame, ticks_per_frame);
+      break;
+    case GST_DECKLINK2_API_LEVEL_11_5_1:
+    case GST_DECKLINK2_API_LEVEL_LATEST:
+      hr = self->output->GetHardwareReferenceClock (scale,
+          hw_time, time_in_frame, ticks_per_frame);
       break;
     default:
       g_assert_not_reached ();
@@ -907,6 +963,50 @@ gst_decklink2_output_start (GstDeckLink2Output * self,
 }
 
 static HRESULT
+gst_decklink2_get_current_level (GstDeckLink2Output * self,
+    guint * buffered_video, GstClockTime * video_running_time,
+    guint * buffered_audio, GstClockTime * audio_running_time,
+    GstClockTimeDiff * av_diff, GstClockTime * hw_time)
+{
+  BMDTimeValue hw_now, dummy, dummy2;
+  HRESULT hr = S_OK;
+
+  *buffered_video = 0;
+  *buffered_audio = 0;
+  *video_running_time = self->pts;
+  *audio_running_time = GST_CLOCK_TIME_NONE;
+  *av_diff = GST_CLOCK_STIME_NONE;
+  *hw_time = GST_CLOCK_TIME_NONE;
+
+  hr = gst_decklink2_output_get_num_buffered (self, buffered_video);
+  if (!gst_decklink2_result (hr))
+    return hr;
+
+  if (self->n_samples > 0 && GST_AUDIO_INFO_IS_VALID (&self->audio_info)) {
+    hr = gst_decklink2_output_get_num_buffered_audio (self, buffered_audio);
+    if (!gst_decklink2_result (hr))
+      return hr;
+
+    *audio_running_time = gst_util_uint64_scale (self->n_samples, GST_SECOND,
+        self->audio_info.rate);
+    *av_diff = GST_CLOCK_DIFF (self->pts, *audio_running_time);
+  }
+
+  if (self->prerolled) {
+    hr = gst_decklink2_output_get_reference_clock (self, GST_SECOND, &hw_now,
+        &dummy, &dummy2);
+    if (!gst_decklink2_result (hr))
+      return hr;
+
+    if (self->hw_time == GST_CLOCK_TIME_NONE)
+      self->hw_time = hw_now;
+    *hw_time = hw_now - self->hw_time;
+  }
+
+  return S_OK;
+}
+
+static HRESULT
 gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
     IDeckLinkVideoFrame * frame)
 {
@@ -916,6 +1016,12 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
   guint num_samples;
   guint num_written;
   guint8 *audio_buf;
+  guint buffered_video = 0;
+  guint buffered_audio = 0;
+  GstClockTime video_running_time = GST_CLOCK_TIME_NONE;
+  GstClockTime audio_running_time = GST_CLOCK_TIME_NONE;
+  GstClockTime hw_time_gst = GST_CLOCK_TIME_NONE;
+  GstClockTimeDiff diff = GST_CLOCK_STIME_NONE;
 
   frame->AddRef ();
   GST_DECKLINK2_CLEAR_COM (self->last_frame);
@@ -925,8 +1031,6 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
   next_pts = gst_util_uint64_scale (self->n_frames,
       self->selected_mode.fps_d * GST_SECOND, self->selected_mode.fps_n);
   dur = next_pts - self->pts;
-
-  GST_LOG_OBJECT (self, "Scheduling video frame %p", frame);
 
   switch (self->api_level) {
     case GST_DECKLINK2_API_LEVEL_10_11:
@@ -954,6 +1058,7 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
   }
 
   audio_buf = priv->audio_buf.GetSamples (num_samples);
+  self->n_samples += num_samples;
 
   if (!self->prerolled) {
     if (self->n_prerolled == 0 && GST_AUDIO_INFO_IS_VALID (&self->audio_info)) {
@@ -1027,6 +1132,19 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
     priv->audio_buf.Flush ();
   }
 
+  hr = gst_decklink2_get_current_level (self, &buffered_video,
+      &video_running_time, &buffered_audio, &audio_running_time, &diff,
+      &hw_time_gst);
+  if (gst_decklink2_result (hr)) {
+    GST_LOG_OBJECT (self, "After schedule, video %" GST_TIME_FORMAT
+        " (%" G_GUINT64_FORMAT ", buffered %u) audio %" GST_TIME_FORMAT
+        " (%" G_GUINT64_FORMAT ", buffered %u), av-diff: %" GST_STIME_FORMAT
+        ", hw-time %" GST_TIME_FORMAT,
+        GST_TIME_ARGS (self->pts), self->n_frames, buffered_video,
+        GST_TIME_ARGS (audio_running_time), self->n_samples, buffered_audio,
+        GST_STIME_ARGS (diff), GST_TIME_ARGS (hw_time_gst));
+  }
+
   return S_OK;
 }
 
@@ -1055,7 +1173,7 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
 
   if (active) {
     guint32 count = 0;
-    hr = gst_decklink2_output_get_num_bufferred (output, &count);
+    hr = gst_decklink2_output_get_num_buffered (output, &count);
     if (!gst_decklink2_result (hr)) {
       GST_ERROR_OBJECT (output,
           "Couldn't query bufferred frame count, hr: 0x%x", (guint) hr);
@@ -1964,6 +2082,8 @@ gst_decklink2_output_configure (GstDeckLink2Output * output,
   output->min_buffered = min_buffered;
   output->max_buffered = max_buffered;
   output->n_frames = 0;
+  output->n_samples = 0;
+  output->hw_time = GST_CLOCK_TIME_NONE;
   output->cdp_hdr_sequence_cntr = 0;
   output->configured = TRUE;
   output->pts = 0;
@@ -1992,7 +2112,6 @@ gst_decklink2_output_on_completed (GstDeckLink2Output * self,
 {
   GstDeckLink2OutputPrivate *priv = self->priv;
   dlbool_t active;
-  guint32 count = 0;
 
   std::lock_guard < std::mutex > lk (priv->schedule_lock);
   if (result == bmdOutputFrameDisplayedLate)
@@ -2005,9 +2124,24 @@ gst_decklink2_output_on_completed (GstDeckLink2Output * self,
 
   HRESULT hr = gst_decklink2_output_is_running (self, &active);
   if (gst_decklink2_result (hr) && active) {
-    hr = gst_decklink2_output_get_num_bufferred (self, &count);
-    if (gst_decklink2_result (hr) && count <= self->min_buffered) {
-      GST_WARNING_OBJECT (self, "Underrun, buffered count %u", count);
+    guint buffered_video = 0;
+    guint buffered_audio = 0;
+    GstClockTime video_running_time = GST_CLOCK_TIME_NONE;
+    GstClockTime audio_running_time = GST_CLOCK_TIME_NONE;
+    GstClockTime hw_time_gst = GST_CLOCK_TIME_NONE;
+    GstClockTimeDiff diff = GST_CLOCK_STIME_NONE;
+
+    hr = gst_decklink2_get_current_level (self, &buffered_video,
+        &video_running_time, &buffered_audio, &audio_running_time, &diff,
+        &hw_time_gst);
+    if (gst_decklink2_result (hr) && buffered_video <= self->min_buffered) {
+      GST_WARNING_OBJECT (self, "Underrun, video %" GST_TIME_FORMAT
+          " (%" G_GUINT64_FORMAT ", buffered %u) audio %" GST_TIME_FORMAT
+          " (%" G_GUINT64_FORMAT ", buffered %u), av-diff: %" GST_STIME_FORMAT
+          ", hw-time %" GST_TIME_FORMAT,
+          GST_TIME_ARGS (self->pts), self->n_frames, buffered_video,
+          GST_TIME_ARGS (audio_running_time), self->n_samples, buffered_audio,
+          GST_STIME_ARGS (diff), GST_TIME_ARGS (hw_time_gst));
       self->underrun_count++;
       priv->audio_buf.PrependSilence ();
       gst_decklink2_output_schedule_video_internal (self, self->last_frame);
