@@ -39,6 +39,321 @@ GST_DEBUG_CATEGORY_STATIC (gst_decklink2_output_debug);
 
 class IGstDeckLinkVideoOutputCallback;
 
+class IGstDeckLinkTimecode:public IDeckLinkTimecode
+{
+public:
+  IGstDeckLinkTimecode (GstVideoTimeCode * timecode):ref_count_ (1)
+  {
+    g_assert (timecode);
+
+    timecode_ = gst_video_time_code_copy (timecode);
+  }
+
+  /* IUnknown */
+  HRESULT STDMETHODCALLTYPE QueryInterface (REFIID riid, void **object)
+  {
+    if (riid == IID_IDeckLinkTimecode) {
+      *object = static_cast < IDeckLinkTimecode * >(this);
+    } else {
+      *object = NULL;
+      return E_NOINTERFACE;
+    }
+
+    AddRef ();
+
+    return S_OK;
+  }
+
+  ULONG STDMETHODCALLTYPE AddRef (void)
+  {
+    ULONG cnt = ref_count_.fetch_add (1);
+
+    return cnt + 1;
+  }
+
+  ULONG STDMETHODCALLTYPE Release (void)
+  {
+    ULONG cnt = ref_count_.fetch_sub (1);
+    if (cnt == 1)
+      delete this;
+
+    return cnt - 1;
+  }
+
+  /* IDeckLinkTimecode */
+  BMDTimecodeBCD STDMETHODCALLTYPE GetBCD (void)
+  {
+    BMDTimecodeBCD bcd = 0;
+
+    bcd |= (timecode_->frames % 10) << 0;
+    bcd |= ((timecode_->frames / 10) & 0x0f) << 4;
+    bcd |= (timecode_->seconds % 10) << 8;
+    bcd |= ((timecode_->seconds / 10) & 0x0f) << 12;
+    bcd |= (timecode_->minutes % 10) << 16;
+    bcd |= ((timecode_->minutes / 10) & 0x0f) << 20;
+    bcd |= (timecode_->hours % 10) << 24;
+    bcd |= ((timecode_->hours / 10) & 0x0f) << 28;
+
+    if (timecode_->config.fps_n == 24 && timecode_->config.fps_d == 1)
+      bcd |= 0x0 << 30;
+    else if (timecode_->config.fps_n == 25 && timecode_->config.fps_d == 1)
+      bcd |= 0x1 << 30;
+    else if (timecode_->config.fps_n == 30 && timecode_->config.fps_d == 1001)
+      bcd |= 0x2 << 30;
+    else if (timecode_->config.fps_n == 30 && timecode_->config.fps_d == 1)
+      bcd |= 0x3 << 30;
+
+    return bcd;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+      GetComponents (unsigned char *hours, unsigned char *minutes,
+      unsigned char *seconds, unsigned char *frames)
+  {
+    *hours = timecode_->hours;
+    *minutes = timecode_->minutes;
+    *seconds = timecode_->seconds;
+    *frames = timecode_->frames;
+
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE GetString (dlstring_t * timecode)
+  {
+    gchar *s = gst_video_time_code_to_string (timecode_);
+    *timecode = StdToDlString (s);
+    g_free (s);
+
+    return S_OK;
+  }
+
+  BMDTimecodeFlags STDMETHODCALLTYPE GetFlags (void)
+  {
+    BMDTimecodeFlags flags = (BMDTimecodeFlags) 0;
+
+    if ((timecode_->config.flags & GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME) != 0)
+      flags = (BMDTimecodeFlags) (flags | bmdTimecodeIsDropFrame);
+    else
+      flags = (BMDTimecodeFlags) (flags | bmdTimecodeFlagDefault);
+
+    if (timecode_->field_count == 2)
+      flags = (BMDTimecodeFlags) (flags | bmdTimecodeFieldMark);
+
+    return flags;
+  }
+
+  HRESULT STDMETHODCALLTYPE GetTimecodeUserBits (BMDTimecodeUserBits * userBits)
+  {
+    *userBits = 0;
+    return S_OK;
+  }
+
+private:
+  virtual ~ IGstDeckLinkTimecode () {
+    gst_video_time_code_free (timecode_);
+  }
+
+private:
+  GstVideoTimeCode * timecode_;
+  std::atomic < ULONG > ref_count_;
+};
+
+class IGstDeckLinkVideoFrame:public IDeckLinkVideoFrame
+{
+public:
+  IGstDeckLinkVideoFrame (GstVideoFrame * frame):ref_count_ (1)
+  {
+    frame_ = *frame;
+  }
+
+  /* IUnknown */
+  HRESULT STDMETHODCALLTYPE QueryInterface (REFIID riid, void **object)
+  {
+    if (riid == IID_IDeckLinkVideoOutputCallback) {
+      *object = static_cast < IDeckLinkVideoFrame * >(this);
+    } else {
+      *object = NULL;
+      return E_NOINTERFACE;
+    }
+
+    AddRef ();
+
+    return S_OK;
+  }
+
+  ULONG STDMETHODCALLTYPE AddRef (void)
+  {
+    ULONG cnt = ref_count_.fetch_add (1);
+
+    return cnt + 1;
+  }
+
+  ULONG STDMETHODCALLTYPE Release (void)
+  {
+    ULONG cnt = ref_count_.fetch_sub (1);
+    if (cnt == 1)
+      delete this;
+
+    return cnt - 1;
+  }
+
+  /* IDeckLinkVideoFrame */
+  long STDMETHODCALLTYPE GetWidth (void)
+  {
+    return GST_VIDEO_FRAME_WIDTH (&frame_);
+  }
+
+  long STDMETHODCALLTYPE GetHeight (void)
+  {
+    return GST_VIDEO_FRAME_HEIGHT (&frame_);
+  }
+
+  long STDMETHODCALLTYPE GetRowBytes (void)
+  {
+    return GST_VIDEO_FRAME_PLANE_STRIDE (&frame_, 0);
+  }
+
+  BMDPixelFormat STDMETHODCALLTYPE GetPixelFormat (void)
+  {
+    BMDPixelFormat format = bmdFormatUnspecified;
+    switch (GST_VIDEO_FRAME_FORMAT (&frame_)) {
+      case GST_VIDEO_FORMAT_UYVY:
+        format = bmdFormat8BitYUV;
+        break;
+      case GST_VIDEO_FORMAT_v210:
+        format = bmdFormat10BitYUV;
+        break;
+      case GST_VIDEO_FORMAT_ARGB:
+        format = bmdFormat8BitARGB;
+        break;
+      case GST_VIDEO_FORMAT_BGRA:
+        format = bmdFormat8BitBGRA;
+        break;
+      default:
+        g_assert_not_reached ();
+        break;
+    }
+
+    return format;
+  }
+
+  BMDFrameFlags STDMETHODCALLTYPE GetFlags (void)
+  {
+    return bmdFrameFlagDefault;
+  }
+
+  HRESULT STDMETHODCALLTYPE GetBytes (void **buffer)
+  {
+    *buffer = GST_VIDEO_FRAME_PLANE_DATA (&frame_, 0);
+
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+      GetTimecode (BMDTimecodeFormat format, IDeckLinkTimecode ** timecode)
+  {
+    if (timecode_) {
+      *timecode = timecode_;
+      timecode_->AddRef ();
+      return S_OK;
+    }
+
+    return S_FALSE;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+      GetAncillaryData (IDeckLinkVideoFrameAncillary ** ancillary)
+  {
+    if (ancillary_) {
+      *ancillary = ancillary_;
+      ancillary_->AddRef ();
+      return S_OK;
+    }
+
+    return S_FALSE;
+  }
+
+  /* Non-interface methods */
+  HRESULT STDMETHODCALLTYPE SetTimecode (GstVideoTimeCode * timecode)
+  {
+    GST_DECKLINK2_CLEAR_COM (timecode_);
+
+    if (timecode)
+      timecode_ = new IGstDeckLinkTimecode (timecode);
+
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+      SetAncillaryData (IDeckLinkVideoFrameAncillary * ancillary)
+  {
+    GST_DECKLINK2_CLEAR_COM (ancillary_);
+
+    ancillary_ = ancillary;
+    if (ancillary_)
+      ancillary_->AddRef ();
+
+    return S_OK;
+  }
+
+  IGstDeckLinkVideoFrame *Clone (void)
+  {
+    IGstDeckLinkVideoFrame *cloned;
+    g_assert (frame_.buffer);
+    GstVideoFrame frame;
+
+    if (!gst_video_frame_map (&frame,
+            &frame_.info, frame_.buffer, GST_MAP_READ)) {
+      return NULL;
+    }
+
+    cloned = new IGstDeckLinkVideoFrame (&frame_);
+    if (ancillary_)
+      cloned->SetAncillaryData (ancillary_);
+    if (timecode_) {
+      timecode_->AddRef ();
+      cloned->timecode_ = timecode_;
+    }
+
+    return cloned;
+  }
+
+  void SetScheduledPts (GstClockTime pts)
+  {
+    pts_ = pts;
+  }
+
+  GstClockTime GetScheduledPts (void)
+  {
+    return pts_;
+  }
+
+  void SetScheduledHwTime (GstClockTime hw_time)
+  {
+    hw_time_ = hw_time;
+  }
+
+  GstClockTime GetScheduledHwTime (void)
+  {
+    return hw_time_;
+  }
+
+private:
+  virtual ~ IGstDeckLinkVideoFrame () {
+    gst_video_frame_unmap (&frame_);
+    GST_DECKLINK2_CLEAR_COM (timecode_);
+    GST_DECKLINK2_CLEAR_COM (ancillary_);
+  }
+
+private:
+  std::atomic < ULONG > ref_count_;
+  GstVideoFrame frame_;
+  IDeckLinkTimecode *timecode_ = NULL;
+  IDeckLinkVideoFrameAncillary *ancillary_ = NULL;
+  GstClockTime pts_ = GST_CLOCK_TIME_NONE;
+  GstClockTime hw_time_ = GST_CLOCK_TIME_NONE;
+};
+
 class GstDecklink2OutputAudioBuffer
 {
 public:
@@ -112,13 +427,14 @@ public:
     guint64 num_samples = next_sample_offset - dup_drop_sample_offset_end_;
     samples_to_drop_ += num_samples;
     dup_drop_sample_offset_end_ = next_sample_offset;
+    size_t cur_size = buffer_.size ();
+    guint64 samples_in_queue = cur_size / info_.bpf;
 
     GST_WARNING_ID (debug_name_.c_str (), "Samples to drop %" G_GUINT64_FORMAT
-        ", total samples to drop %" G_GUINT64_FORMAT, num_samples,
-        samples_to_drop_);
+        ", total samples to drop %" G_GUINT64_FORMAT ", samples in queue %"
+        G_GUINT64_FORMAT, num_samples, samples_to_drop_, samples_in_queue);
 
     size_t bytes_to_drop = samples_to_drop_ * info_.bpf;
-    size_t cur_size = buffer_.size ();
     if (cur_size >= bytes_to_drop) {
       buffer_.resize (cur_size - bytes_to_drop);
       samples_to_drop_ = 0;
@@ -187,7 +503,7 @@ private:
 struct GstDeckLink2OutputPrivate
 {
   std::mutex extern_lock;
-  std::mutex schedule_lock;
+  std::recursive_mutex schedule_lock;
   std::condition_variable cond;
   GstDecklink2OutputAudioBuffer audio_buf;
 };
@@ -212,7 +528,7 @@ struct _GstDeckLink2Output
   IDeckLinkOutput_v10_11 *output_10_11;
 
   IGstDeckLinkVideoOutputCallback *callback;
-  IDeckLinkVideoFrame *last_frame;
+  IGstDeckLinkVideoFrame *last_frame;
 
   GstCaps *caps;
   GArray *format_table;
@@ -230,8 +546,10 @@ struct _GstDeckLink2Output
   guint n_preroll_frames;
   guint min_buffered;
   guint max_buffered;
+  guint gap_frames;
   GstClockTime pts;
   BMDTimeValue hw_time;
+  gboolean duplicating;
 
   gboolean configured;
   gboolean prerolled;
@@ -245,6 +563,9 @@ static void gst_decklink2_output_finalize (GObject * object);
 static void gst_decklink2_output_on_stopped (GstDeckLink2Output * self);
 static void gst_decklink2_output_on_completed (GstDeckLink2Output * self,
     BMDOutputFrameCompletionResult result);
+static HRESULT
+gst_decklink2_output_get_completion_timestamp (GstDeckLink2Output * self,
+    IDeckLinkVideoFrame * frame, BMDTimeScale scale, BMDTimeValue * timestamp);
 
 #define gst_decklink2_output_parent_class parent_class
 G_DEFINE_TYPE (GstDeckLink2Output, gst_decklink2_output, GST_TYPE_OBJECT);
@@ -293,15 +614,33 @@ public:
       ScheduledFrameCompleted (IDeckLinkVideoFrame * frame,
       BMDOutputFrameCompletionResult result)
   {
+    IGstDeckLinkVideoFrame *gst_frame = (IGstDeckLinkVideoFrame *) frame;
+    BMDTimeValue timestamp = GST_CLOCK_TIME_NONE;
+    GstClockTime pts, hw_pts;
+
+    pts = gst_frame->GetScheduledPts ();
+    hw_pts = gst_frame->GetScheduledHwTime ();
+    gst_decklink2_output_get_completion_timestamp (output_,
+        frame, GST_SECOND, &timestamp);
+
     switch (result) {
       case bmdOutputFrameCompleted:
-        GST_LOG_OBJECT (output_, "Completed frame %p", frame);
+        GST_LOG_OBJECT (output_, "Frame %p completed timestamp %"
+            GST_TIME_FORMAT ", scheduled %" GST_TIME_FORMAT
+            " (gst pts %" GST_TIME_FORMAT ")", frame,
+            GST_TIME_ARGS (timestamp), GST_TIME_ARGS (hw_pts),
+            GST_TIME_ARGS (pts));
         break;
       case bmdOutputFrameDisplayedLate:
-        GST_WARNING_OBJECT (output_, "Late Frame %p", frame);
+        GST_LOG_OBJECT (output_, "Frame %p late, completed timestamp %"
+            GST_TIME_FORMAT ", scheduled %" GST_TIME_FORMAT
+            " (gst pts %" GST_TIME_FORMAT ")", frame,
+            GST_TIME_ARGS (timestamp), GST_TIME_ARGS (hw_pts),
+            GST_TIME_ARGS (pts));
         break;
       case bmdOutputFrameDropped:
-        GST_WARNING_OBJECT (output_, "Dropped Frame %p", frame);
+        GST_WARNING_OBJECT (output_, "Frame %p dropped, scheduled %"
+            GST_TIME_FORMAT, frame, GST_TIME_ARGS (pts));
         break;
       case bmdOutputFrameFlushed:
         GST_LOG_OBJECT (output_, "Flushed Frame %p", frame);
@@ -937,6 +1276,34 @@ gst_decklink2_output_get_reference_clock (GstDeckLink2Output * self,
 }
 
 static HRESULT
+gst_decklink2_output_get_completion_timestamp (GstDeckLink2Output * self,
+    IDeckLinkVideoFrame * frame, BMDTimeScale scale, BMDTimeValue * timestamp)
+{
+  HRESULT hr = E_FAIL;
+
+  switch (self->api_level) {
+    case GST_DECKLINK2_API_LEVEL_10_11:
+      hr = self->output_10_11->GetFrameCompletionReferenceTimestamp (frame,
+          scale, timestamp);
+      break;
+    case GST_DECKLINK2_API_LEVEL_11_4:
+      hr = self->output_11_4->GetFrameCompletionReferenceTimestamp (frame,
+          scale, timestamp);
+      break;
+    case GST_DECKLINK2_API_LEVEL_11_5_1:
+    case GST_DECKLINK2_API_LEVEL_LATEST:
+      hr = self->output->GetFrameCompletionReferenceTimestamp (frame,
+          scale, timestamp);
+      break;
+    default:
+      g_assert_not_reached ();
+      break;
+  }
+
+  return hr;
+}
+
+static HRESULT
 gst_decklink2_output_start (GstDeckLink2Output * self,
     BMDTimeValue start_time, BMDTimeScale scale, double speed)
 {
@@ -966,7 +1333,8 @@ static HRESULT
 gst_decklink2_get_current_level (GstDeckLink2Output * self,
     guint * buffered_video, GstClockTime * video_running_time,
     guint * buffered_audio, GstClockTime * audio_running_time,
-    GstClockTimeDiff * av_diff, GstClockTime * hw_time)
+    GstClockTimeDiff * av_diff, GstClockTime * hw_time,
+    GstClockTime * hw_now_gst)
 {
   BMDTimeValue hw_now, dummy, dummy2;
   HRESULT hr = S_OK;
@@ -1003,12 +1371,15 @@ gst_decklink2_get_current_level (GstDeckLink2Output * self,
     *hw_time = hw_now - self->hw_time;
   }
 
+  if (hw_now_gst)
+    *hw_now_gst = (GstClockTime) hw_now;
+
   return S_OK;
 }
 
 static HRESULT
 gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
-    IDeckLinkVideoFrame * frame)
+    IGstDeckLinkVideoFrame * frame)
 {
   GstDeckLink2OutputPrivate *priv = self->priv;
   GstClockTime next_pts, dur;
@@ -1021,11 +1392,28 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
   GstClockTime video_running_time = GST_CLOCK_TIME_NONE;
   GstClockTime audio_running_time = GST_CLOCK_TIME_NONE;
   GstClockTime hw_time_gst = GST_CLOCK_TIME_NONE;
+  GstClockTime hw_now_gst = GST_CLOCK_TIME_NONE;
   GstClockTimeDiff diff = GST_CLOCK_STIME_NONE;
+
+  hr = gst_decklink2_get_current_level (self, &buffered_video,
+      &video_running_time, &buffered_audio, &audio_running_time, &diff,
+      &hw_time_gst, &hw_now_gst);
+  if (gst_decklink2_result (hr)) {
+    GST_LOG_OBJECT (self, "Before schedule, video %" GST_TIME_FORMAT
+        " (%" G_GUINT64_FORMAT ", buffered %u) audio %" GST_TIME_FORMAT
+        " (%" G_GUINT64_FORMAT ", buffered %u), av-diff: %" GST_STIME_FORMAT
+        ", hw-time %" GST_TIME_FORMAT,
+        GST_TIME_ARGS (self->pts), self->n_frames, buffered_video,
+        GST_TIME_ARGS (audio_running_time), self->n_samples, buffered_audio,
+        GST_STIME_ARGS (diff), GST_TIME_ARGS (hw_time_gst));
+  }
 
   frame->AddRef ();
   GST_DECKLINK2_CLEAR_COM (self->last_frame);
   self->last_frame = frame;
+
+  frame->SetScheduledPts (self->pts);
+  frame->SetScheduledHwTime (hw_now_gst);
 
   self->n_frames++;
   next_pts = gst_util_uint64_scale (self->n_frames,
@@ -1132,19 +1520,6 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
     priv->audio_buf.Flush ();
   }
 
-  hr = gst_decklink2_get_current_level (self, &buffered_video,
-      &video_running_time, &buffered_audio, &audio_running_time, &diff,
-      &hw_time_gst);
-  if (gst_decklink2_result (hr)) {
-    GST_LOG_OBJECT (self, "After schedule, video %" GST_TIME_FORMAT
-        " (%" G_GUINT64_FORMAT ", buffered %u) audio %" GST_TIME_FORMAT
-        " (%" G_GUINT64_FORMAT ", buffered %u), av-diff: %" GST_STIME_FORMAT
-        ", hw-time %" GST_TIME_FORMAT,
-        GST_TIME_ARGS (self->pts), self->n_frames, buffered_video,
-        GST_TIME_ARGS (audio_running_time), self->n_samples, buffered_audio,
-        GST_STIME_ARGS (diff), GST_TIME_ARGS (hw_time_gst));
-  }
-
   return S_OK;
 }
 
@@ -1172,18 +1547,32 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
   }
 
   if (active) {
-    guint32 count = 0;
-    hr = gst_decklink2_output_get_num_buffered (output, &count);
+    std::lock_guard < std::recursive_mutex > slk (priv->schedule_lock);
+    guint buffered_video = 0;
+    guint buffered_audio = 0;
+    GstClockTime video_running_time = GST_CLOCK_TIME_NONE;
+    GstClockTime audio_running_time = GST_CLOCK_TIME_NONE;
+    GstClockTime hw_time_gst = GST_CLOCK_TIME_NONE;
+    GstClockTimeDiff diff = GST_CLOCK_STIME_NONE;
+
+    hr = gst_decklink2_get_current_level (output, &buffered_video,
+        &video_running_time, &buffered_audio, &audio_running_time, &diff,
+        &hw_time_gst, NULL);
+
     if (!gst_decklink2_result (hr)) {
       GST_ERROR_OBJECT (output,
           "Couldn't query bufferred frame count, hr: 0x%x", (guint) hr);
       return hr;
     }
 
-    if (count > output->max_buffered) {
-      GST_WARNING_OBJECT (output, "Skipping frame, buffered count %u > %u",
-          count, output->max_buffered);
-      std::lock_guard < std::mutex > slk (priv->schedule_lock);
+    if (buffered_video > output->max_buffered) {
+      GST_WARNING_OBJECT (output, "Skipping frame, video %" GST_TIME_FORMAT
+          " (%" G_GUINT64_FORMAT ", buffered %u) audio %" GST_TIME_FORMAT
+          " (%" G_GUINT64_FORMAT ", buffered %u), av-diff: %" GST_STIME_FORMAT
+          ", hw-time %" GST_TIME_FORMAT,
+          GST_TIME_ARGS (output->pts), output->n_frames, buffered_video,
+          GST_TIME_ARGS (audio_running_time), output->n_samples, buffered_audio,
+          GST_STIME_ARGS (diff), GST_TIME_ARGS (hw_time_gst));
 
       /* audio and video may not be completely aligned. Add this sample
        * and drop video frame duration amount of audio samples */
@@ -1195,10 +1584,11 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
   }
   lk.unlock ();
 
-  std::lock_guard < std::mutex > slk (priv->schedule_lock);
+  std::lock_guard < std::recursive_mutex > slk (priv->schedule_lock);
   priv->audio_buf.Append (audio_buf, audio_buf_size);
 
-  hr = gst_decklink2_output_schedule_video_internal (output, frame);
+  hr = gst_decklink2_output_schedule_video_internal (output,
+      (IGstDeckLinkVideoFrame *) frame);
   *drop_count = output->drop_count;
   *late_count = output->late_count;
   *underrun_count = output->underrun_count;
@@ -1214,7 +1604,7 @@ gst_decklink2_output_stop_internal (GstDeckLink2Output * self)
 
   GST_DEBUG_OBJECT (self, "Stopping");
 
-  std::unique_lock < std::mutex > lk (priv->schedule_lock);
+  std::unique_lock < std::recursive_mutex > lk (priv->schedule_lock);
   /* Steal last frame to avoid re-rendering */
   GST_DECKLINK2_CLEAR_COM (self->last_frame);
   lk.unlock ();
@@ -1257,277 +1647,6 @@ gst_decklink2_output_stop (GstDeckLink2Output * output)
 
   return gst_decklink2_output_stop_internal (output);
 }
-
-class IGstDeckLinkTimecode:public IDeckLinkTimecode
-{
-public:
-  IGstDeckLinkTimecode (GstVideoTimeCode * timecode):ref_count_ (1)
-  {
-    g_assert (timecode);
-
-    timecode_ = gst_video_time_code_copy (timecode);
-  }
-
-  /* IUnknown */
-  HRESULT STDMETHODCALLTYPE QueryInterface (REFIID riid, void **object)
-  {
-    if (riid == IID_IDeckLinkTimecode) {
-      *object = static_cast < IDeckLinkTimecode * >(this);
-    } else {
-      *object = NULL;
-      return E_NOINTERFACE;
-    }
-
-    AddRef ();
-
-    return S_OK;
-  }
-
-  ULONG STDMETHODCALLTYPE AddRef (void)
-  {
-    ULONG cnt = ref_count_.fetch_add (1);
-
-    return cnt + 1;
-  }
-
-  ULONG STDMETHODCALLTYPE Release (void)
-  {
-    ULONG cnt = ref_count_.fetch_sub (1);
-    if (cnt == 1)
-      delete this;
-
-    return cnt - 1;
-  }
-
-  /* IDeckLinkTimecode */
-  BMDTimecodeBCD STDMETHODCALLTYPE GetBCD (void)
-  {
-    BMDTimecodeBCD bcd = 0;
-
-    bcd |= (timecode_->frames % 10) << 0;
-    bcd |= ((timecode_->frames / 10) & 0x0f) << 4;
-    bcd |= (timecode_->seconds % 10) << 8;
-    bcd |= ((timecode_->seconds / 10) & 0x0f) << 12;
-    bcd |= (timecode_->minutes % 10) << 16;
-    bcd |= ((timecode_->minutes / 10) & 0x0f) << 20;
-    bcd |= (timecode_->hours % 10) << 24;
-    bcd |= ((timecode_->hours / 10) & 0x0f) << 28;
-
-    if (timecode_->config.fps_n == 24 && timecode_->config.fps_d == 1)
-      bcd |= 0x0 << 30;
-    else if (timecode_->config.fps_n == 25 && timecode_->config.fps_d == 1)
-      bcd |= 0x1 << 30;
-    else if (timecode_->config.fps_n == 30 && timecode_->config.fps_d == 1001)
-      bcd |= 0x2 << 30;
-    else if (timecode_->config.fps_n == 30 && timecode_->config.fps_d == 1)
-      bcd |= 0x3 << 30;
-
-    return bcd;
-  }
-
-  HRESULT STDMETHODCALLTYPE
-      GetComponents (unsigned char *hours, unsigned char *minutes,
-      unsigned char *seconds, unsigned char *frames)
-  {
-    *hours = timecode_->hours;
-    *minutes = timecode_->minutes;
-    *seconds = timecode_->seconds;
-    *frames = timecode_->frames;
-
-    return S_OK;
-  }
-
-  HRESULT STDMETHODCALLTYPE GetString (dlstring_t * timecode)
-  {
-    gchar *s = gst_video_time_code_to_string (timecode_);
-    *timecode = StdToDlString (s);
-    g_free (s);
-
-    return S_OK;
-  }
-
-  BMDTimecodeFlags STDMETHODCALLTYPE GetFlags (void)
-  {
-    BMDTimecodeFlags flags = (BMDTimecodeFlags) 0;
-
-    if ((timecode_->config.flags & GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME) != 0)
-      flags = (BMDTimecodeFlags) (flags | bmdTimecodeIsDropFrame);
-    else
-      flags = (BMDTimecodeFlags) (flags | bmdTimecodeFlagDefault);
-
-    if (timecode_->field_count == 2)
-      flags = (BMDTimecodeFlags) (flags | bmdTimecodeFieldMark);
-
-    return flags;
-  }
-
-  HRESULT STDMETHODCALLTYPE GetTimecodeUserBits (BMDTimecodeUserBits * userBits)
-  {
-    *userBits = 0;
-    return S_OK;
-  }
-
-private:
-  virtual ~ IGstDeckLinkTimecode () {
-    gst_video_time_code_free (timecode_);
-  }
-
-private:
-  GstVideoTimeCode * timecode_;
-  std::atomic < ULONG > ref_count_;
-};
-
-class IGstDeckLinkVideoFrame:public IDeckLinkVideoFrame
-{
-public:
-  IGstDeckLinkVideoFrame (GstVideoFrame * frame):ref_count_ (1)
-  {
-    frame_ = *frame;
-  }
-
-  /* IUnknown */
-  HRESULT STDMETHODCALLTYPE QueryInterface (REFIID riid, void **object)
-  {
-    if (riid == IID_IDeckLinkVideoOutputCallback) {
-      *object = static_cast < IDeckLinkVideoFrame * >(this);
-    } else {
-      *object = NULL;
-      return E_NOINTERFACE;
-    }
-
-    AddRef ();
-
-    return S_OK;
-  }
-
-  ULONG STDMETHODCALLTYPE AddRef (void)
-  {
-    ULONG cnt = ref_count_.fetch_add (1);
-
-    return cnt + 1;
-  }
-
-  ULONG STDMETHODCALLTYPE Release (void)
-  {
-    ULONG cnt = ref_count_.fetch_sub (1);
-    if (cnt == 1)
-      delete this;
-
-    return cnt - 1;
-  }
-
-  /* IDeckLinkVideoFrame */
-  long STDMETHODCALLTYPE GetWidth (void)
-  {
-    return GST_VIDEO_FRAME_WIDTH (&frame_);
-  }
-
-  long STDMETHODCALLTYPE GetHeight (void)
-  {
-    return GST_VIDEO_FRAME_HEIGHT (&frame_);
-  }
-
-  long STDMETHODCALLTYPE GetRowBytes (void)
-  {
-    return GST_VIDEO_FRAME_PLANE_STRIDE (&frame_, 0);
-  }
-
-  BMDPixelFormat STDMETHODCALLTYPE GetPixelFormat (void)
-  {
-    BMDPixelFormat format = bmdFormatUnspecified;
-    switch (GST_VIDEO_FRAME_FORMAT (&frame_)) {
-      case GST_VIDEO_FORMAT_UYVY:
-        format = bmdFormat8BitYUV;
-        break;
-      case GST_VIDEO_FORMAT_v210:
-        format = bmdFormat10BitYUV;
-        break;
-      case GST_VIDEO_FORMAT_ARGB:
-        format = bmdFormat8BitARGB;
-        break;
-      case GST_VIDEO_FORMAT_BGRA:
-        format = bmdFormat8BitBGRA;
-        break;
-      default:
-        g_assert_not_reached ();
-        break;
-    }
-
-    return format;
-  }
-
-  BMDFrameFlags STDMETHODCALLTYPE GetFlags (void)
-  {
-    return bmdFrameFlagDefault;
-  }
-
-  HRESULT STDMETHODCALLTYPE GetBytes (void **buffer)
-  {
-    *buffer = GST_VIDEO_FRAME_PLANE_DATA (&frame_, 0);
-
-    return S_OK;
-  }
-
-  HRESULT STDMETHODCALLTYPE
-      GetTimecode (BMDTimecodeFormat format, IDeckLinkTimecode ** timecode)
-  {
-    if (timecode_) {
-      *timecode = timecode_;
-      timecode_->AddRef ();
-      return S_OK;
-    }
-
-    return S_FALSE;
-  }
-
-  HRESULT STDMETHODCALLTYPE
-      GetAncillaryData (IDeckLinkVideoFrameAncillary ** ancillary)
-  {
-    if (ancillary_) {
-      *ancillary = ancillary_;
-      ancillary_->AddRef ();
-      return S_OK;
-    }
-
-    return S_FALSE;
-  }
-
-  /* Non-interface methods */
-  HRESULT STDMETHODCALLTYPE SetTimecode (GstVideoTimeCode * timecode)
-  {
-    GST_DECKLINK2_CLEAR_COM (timecode_);
-
-    if (timecode)
-      timecode_ = new IGstDeckLinkTimecode (timecode);
-
-    return S_OK;
-  }
-
-  HRESULT STDMETHODCALLTYPE
-      SetAncillaryData (IDeckLinkVideoFrameAncillary * ancillary)
-  {
-    GST_DECKLINK2_CLEAR_COM (ancillary_);
-
-    ancillary_ = ancillary;
-    if (ancillary_)
-      ancillary_->AddRef ();
-
-    return S_OK;
-  }
-
-private:
-  virtual ~ IGstDeckLinkVideoFrame () {
-    gst_video_frame_unmap (&frame_);
-    GST_DECKLINK2_CLEAR_COM (timecode_);
-    GST_DECKLINK2_CLEAR_COM (ancillary_);
-  }
-
-private:
-  std::atomic < ULONG > ref_count_;
-  GstVideoFrame frame_;
-  IDeckLinkTimecode *timecode_ = NULL;
-  IDeckLinkVideoFrameAncillary *ancillary_ = NULL;
-};
 
 /* Copied from ext/closedcaption/gstccconverter.c */
 /* Converts raw CEA708 cc_data and an optional timecode into CDP */
@@ -2090,6 +2209,12 @@ gst_decklink2_output_configure (GstDeckLink2Output * output,
   output->drop_count = 0;
   output->late_count = 0;
   output->underrun_count = 0;
+  output->gap_frames = 1;
+  if (max_buffered > min_buffered) {
+    guint gap = (max_buffered - min_buffered) / 2;
+    output->gap_frames = MAX (2, gap);
+  }
+  output->duplicating = FALSE;
 
   return S_OK;
 
@@ -2113,7 +2238,7 @@ gst_decklink2_output_on_completed (GstDeckLink2Output * self,
   GstDeckLink2OutputPrivate *priv = self->priv;
   dlbool_t active;
 
-  std::lock_guard < std::mutex > lk (priv->schedule_lock);
+  std::lock_guard < std::recursive_mutex > lk (priv->schedule_lock);
   if (result == bmdOutputFrameDisplayedLate)
     self->late_count++;
   else if (result == bmdOutputFrameDropped)
@@ -2129,11 +2254,12 @@ gst_decklink2_output_on_completed (GstDeckLink2Output * self,
     GstClockTime video_running_time = GST_CLOCK_TIME_NONE;
     GstClockTime audio_running_time = GST_CLOCK_TIME_NONE;
     GstClockTime hw_time_gst = GST_CLOCK_TIME_NONE;
+    GstClockTime dummy;
     GstClockTimeDiff diff = GST_CLOCK_STIME_NONE;
 
     hr = gst_decklink2_get_current_level (self, &buffered_video,
         &video_running_time, &buffered_audio, &audio_running_time, &diff,
-        &hw_time_gst);
+        &hw_time_gst, &dummy);
     if (gst_decklink2_result (hr) && buffered_video <= self->min_buffered) {
       GST_WARNING_OBJECT (self, "Underrun, video %" GST_TIME_FORMAT
           " (%" G_GUINT64_FORMAT ", buffered %u) audio %" GST_TIME_FORMAT
@@ -2143,8 +2269,22 @@ gst_decklink2_output_on_completed (GstDeckLink2Output * self,
           GST_TIME_ARGS (audio_running_time), self->n_samples, buffered_audio,
           GST_STIME_ARGS (diff), GST_TIME_ARGS (hw_time_gst));
       self->underrun_count++;
-      priv->audio_buf.PrependSilence ();
-      gst_decklink2_output_schedule_video_internal (self, self->last_frame);
+      if (self->duplicating)
+        return;
+
+      self->duplicating = TRUE;
+      for (guint i = 0; i < self->gap_frames; i++) {
+        IGstDeckLinkVideoFrame *copy = self->last_frame->Clone ();
+        if (!copy) {
+          GST_ERROR_OBJECT (self, "Couldn't clone last frame");
+          copy = self->last_frame;
+          self->last_frame->AddRef ();
+        }
+        priv->audio_buf.PrependSilence ();
+        gst_decklink2_output_schedule_video_internal (self, copy);
+        copy->Release ();
+      }
+      self->duplicating = FALSE;
     }
   }
 }
