@@ -243,7 +243,7 @@ gst_decklink2_sink_class_init (GstDeckLink2SinkClass * klass)
 
   g_object_class_install_property (object_class, PROP_AUTO_RESTART,
       g_param_spec_boolean ("auto-restart", "Auto Restart",
-          "Restart streaming when frame is dropped, late or underrun happens",
+          "Restart streaming when frame is being dropped by hardware",
           DEFAULT_AUTO_RESTART,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
@@ -962,10 +962,11 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
     return GST_FLOW_ERROR;
   }
 
-  if (self->auto_restart && (drop_count || late_count || underrun_count)) {
+  if (self->auto_restart && (drop_count + late_count >
+          (guint) self->n_preroll_frames)) {
     GST_WARNING_OBJECT (self, "Restart output, drop count: %" G_GUINT64_FORMAT
-        ", late cout: %" G_GUINT64_FORMAT ", %" G_GUINT64_FORMAT,
-        drop_count, late_count, underrun_count);
+        ", late cout: %" G_GUINT64_FORMAT ", underrun count: %"
+        G_GUINT64_FORMAT, drop_count, late_count, underrun_count);
 
     hr = gst_decklink2_output_configure (self->output, self->n_preroll_frames,
         self->min_buffered_frames, self->max_buffered_frames,
