@@ -36,6 +36,8 @@ typedef struct
   GstClockTime video_running_time;
   GstClockTime audio_running_time;
   GstClockTime hw_time;
+  GstClockTime buffered_video_time;
+  GstClockTime buffered_audio_time;
   guint64 scheduled_video_frames;
   guint64 scheduled_audio_samples;
   guint64 late_count;
