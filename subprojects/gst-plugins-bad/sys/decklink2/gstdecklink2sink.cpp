@@ -49,7 +49,8 @@ enum
   PROP_N_PREROLL_FRAMES,
   PROP_MIN_BUFFERED_FRAMES,
   PROP_MAX_BUFFERED_FRAMES,
-  PROP_AUTO_RESTART
+  PROP_AUTO_RESTART,
+  PROP_OUTPUT_STATS,
 };
 
 #define DEFAULT_MODE                bmdModeUnknown
@@ -119,6 +120,8 @@ struct _GstDeckLink2Sink
   guint min_buffered_frames;
   guint max_buffered_frames;
   gboolean auto_restart;
+
+  GstDecklink2OutputStats stats;
 };
 
 static void gst_decklink2_sink_set_property (GObject * object,
@@ -246,6 +249,11 @@ gst_decklink2_sink_class_init (GstDeckLink2SinkClass * klass)
           "Restart streaming when frame is being dropped by hardware",
           DEFAULT_AUTO_RESTART,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  g_object_class_install_property (object_class, PROP_OUTPUT_STATS,
+      g_param_spec_boxed ("output-stats", "Output Statistics",
+          "Output Statistics", GST_TYPE_STRUCTURE,
+          (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
 
   gst_decklink2_sink_signals[SIGNAL_RESTART] =
       g_signal_new_class_handler ("restart", G_TYPE_FROM_CLASS (klass),
@@ -454,6 +462,31 @@ gst_decklink2_sink_get_property (GObject * object, guint prop_id,
     case PROP_AUTO_RESTART:
       g_value_set_boolean (value, self->auto_restart);
       break;
+    case PROP_OUTPUT_STATS:
+    {
+      GstStructure *s;
+      GstDecklink2OutputStats *stats = &self->stats;
+
+      s = gst_structure_new ("output-stats",
+          "buffered-video", G_TYPE_UINT, stats->buffered_video,
+          "buffered-audio", G_TYPE_UINT, stats->buffered_audio,
+          "video-running-time", G_TYPE_UINT64, stats->video_running_time,
+          "audio-running-time", G_TYPE_UINT64, stats->audio_running_time,
+          "hardware-time", G_TYPE_UINT64, stats->hw_time,
+          "scheduled-video-frames", G_TYPE_UINT64, stats->scheduled_video_frames,
+          "scheduled-audio-samples", G_TYPE_UINT64, stats->scheduled_audio_samples,
+          "dropped-frames", G_TYPE_UINT64, stats->drop_count,
+          "dropped-samples", G_TYPE_UINT64, stats->dropped_sample_count,
+          "late-count", G_TYPE_UINT64, stats->late_count,
+          "overrun-count", G_TYPE_UINT64, stats->overrun_count,
+          "underrun-count", G_TYPE_UINT64, stats->underrun_count,
+          "duplicated-frames", G_TYPE_UINT64, stats->duplicate_count,
+          "silent-samples", G_TYPE_UINT64, stats->silent_sample_count,
+          NULL);
+      g_value_take_boxed (value, s);
+
+      break;
+    }
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -747,6 +780,8 @@ gst_decklink2_sink_start (GstBaseSink * sink)
 
   GST_DEBUG_OBJECT (self, "Start");
 
+  memset (&self->stats, 0, sizeof (GstDecklink2OutputStats));
+
   self->output = gst_decklink2_acquire_output (self->device_number,
       self->persistent_id);
 
@@ -901,7 +936,7 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
   GstMapInfo info;
   guint8 *audio_data = NULL;
   gsize audio_data_size = 0;
-  guint64 drop_count, late_count, underrun_count;
+  GstDecklink2OutputStats stats = { 0, };
 
   if (!self->prepared_frame) {
     GST_ERROR_OBJECT (self, "No prepared frame");
@@ -950,8 +985,7 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
       G_GSIZE_FORMAT, self->prepared_frame, audio_data_size);
 
   hr = gst_decklink2_output_schedule_stream (self->output,
-      self->prepared_frame, audio_data, audio_data_size, &drop_count,
-      &late_count, &underrun_count);
+      self->prepared_frame, audio_data, audio_data_size, &stats);
 
   if (audio_buf)
     gst_buffer_unmap (audio_buf, &info);
@@ -962,11 +996,12 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
     return GST_FLOW_ERROR;
   }
 
-  if (self->auto_restart && (drop_count + late_count >
+  if (self->auto_restart && (stats.drop_count + stats.late_count >
           (guint) self->n_preroll_frames)) {
     GST_WARNING_OBJECT (self, "Restart output, drop count: %" G_GUINT64_FORMAT
         ", late cout: %" G_GUINT64_FORMAT ", underrun count: %"
-        G_GUINT64_FORMAT, drop_count, late_count, underrun_count);
+        G_GUINT64_FORMAT, stats.drop_count, stats.late_count,
+        stats.underrun_count);
 
     hr = gst_decklink2_output_configure (self->output, self->n_preroll_frames,
         self->min_buffered_frames, self->max_buffered_frames,
@@ -979,6 +1014,9 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
       return GST_FLOW_OK;
     }
   }
+
+  std::lock_guard < std::mutex > lk (priv->lock);
+  self->stats = stats;
 
   return GST_FLOW_OK;
 }
