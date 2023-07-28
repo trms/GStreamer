@@ -1558,7 +1558,7 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
 HRESULT
 gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
     IDeckLinkVideoFrame * frame, guint8 * audio_buf, gsize audio_buf_size,
-    GstDecklink2OutputStats *stats)
+    GstDecklink2OutputStats * stats)
 {
   GstDeckLink2OutputPrivate *priv = output->priv;
   HRESULT hr;
@@ -1597,6 +1597,13 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
     stats->buffered_audio = buffered_audio;
     stats->video_running_time = video_running_time;
     stats->audio_running_time = audio_running_time;
+    stats->buffered_video_time = gst_util_uint64_scale (buffered_video,
+        output->selected_mode.fps_d * GST_SECOND, output->selected_mode.fps_n);
+    stats->buffered_audio_time = 0;
+    if (GST_AUDIO_INFO_IS_VALID (&output->audio_info)) {
+      stats->buffered_audio_time = gst_util_uint64_scale (buffered_audio,
+          GST_SECOND, output->audio_info.rate);
+    }
     stats->hw_time = hw_time_gst;
     stats->scheduled_video_frames = output->n_frames;
     stats->scheduled_audio_samples = output->n_samples;
