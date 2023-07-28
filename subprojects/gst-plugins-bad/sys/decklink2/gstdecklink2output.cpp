@@ -381,10 +381,10 @@ public:
     init_done_ = false;
   }
 
-  void Append (const guint8 * data, size_t size)
+  guint64 Append (const guint8 * data, size_t size)
   {
     if (!data || size == 0 || !init_done_)
-      return;
+      return 0;
 
     size_t cur_size = buffer_.size ();
     size_t num_samples = size / info_.bpf;
@@ -402,24 +402,26 @@ public:
         size_t bytes_to_drop = samples_to_drop_ * info_.bpf;
         samples_to_drop_ = 0;
         if (actual_append_samples == 0)
-          return;
+          return num_samples;
 
         data += bytes_to_drop;
         size -= bytes_to_drop;
       } else {
         samples_to_drop_ -= num_samples;
-        return;
+        return num_samples;
       }
     }
 
     buffer_.resize (cur_size + size);
     memcpy (&buffer_[0] + cur_size, data, size);
+
+    return num_samples;
   }
 
-  void Drop ()
+  guint64 Drop ()
   {
     if (!init_done_)
-      return;
+      return 0;
 
     video_frame_dup_drop_count_++;
     guint64 next_sample_offset =
@@ -444,12 +446,14 @@ public:
       samples_to_drop_ -= samples_in_buffer;
       buffer_.clear ();
     }
+
+    return num_samples;
   }
 
-  void PrependSilence ()
+  guint64 PrependSilence ()
   {
     if (!init_done_)
-      return;
+      return 0;
 
     video_frame_dup_drop_count_++;
     guint64 next_sample_offset =
@@ -471,6 +475,8 @@ public:
 
     gst_audio_format_info_fill_silence (info_.finfo, &buffer_[0],
         silence_length_in_bytes);
+
+    return num_samples;
   }
 
   guint8 *GetSamples (guint & num_samples, guint64 & sample_pos)
@@ -581,6 +587,10 @@ struct _GstDeckLink2Output
   guint64 late_count;
   guint64 drop_count;
   guint64 underrun_count;
+  guint64 overrun_count;
+  guint64 duplicate_count;
+  guint64 dropped_sample_count;
+  guint64 silent_sample_count;
 };
 
 static void gst_decklink2_output_dispose (GObject * object);
@@ -1548,7 +1558,7 @@ gst_decklink2_output_schedule_video_internal (GstDeckLink2Output * self,
 HRESULT
 gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
     IDeckLinkVideoFrame * frame, guint8 * audio_buf, gsize audio_buf_size,
-    guint64 * drop_count, guint64 * late_count, guint64 * underrun_count)
+    GstDecklink2OutputStats *stats)
 {
   GstDeckLink2OutputPrivate *priv = output->priv;
   HRESULT hr;
@@ -1556,10 +1566,6 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
   dlbool_t active;
 
   g_assert (output->configured);
-
-  *drop_count = 0;
-  *late_count = 0;
-  *underrun_count = 0;
 
   hr = gst_decklink2_output_is_running (output, &active);
   if (!gst_decklink2_result (hr)) {
@@ -1587,6 +1593,21 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
       return hr;
     }
 
+    stats->buffered_video = buffered_video;
+    stats->buffered_audio = buffered_audio;
+    stats->video_running_time = video_running_time;
+    stats->audio_running_time = audio_running_time;
+    stats->hw_time = hw_time_gst;
+    stats->scheduled_video_frames = output->n_frames;
+    stats->scheduled_audio_samples = output->n_samples;
+    stats->late_count = output->late_count;
+    stats->drop_count = output->drop_count;
+    stats->overrun_count = output->overrun_count;
+    stats->underrun_count = output->underrun_count;
+    stats->duplicate_count = output->duplicate_count;
+    stats->silent_sample_count = output->silent_sample_count;
+    stats->dropped_sample_count = output->dropped_sample_count;
+
     if (buffered_video > output->max_buffered) {
       GST_WARNING_OBJECT (output, "Skipping frame, video %" GST_TIME_FORMAT
           " (%" G_GUINT64_FORMAT ", buffered %u) audio %" GST_TIME_FORMAT
@@ -1599,7 +1620,8 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
       /* audio and video may not be completely aligned. Add this sample
        * and drop video frame duration amount of audio samples */
       priv->audio_buf.Append (audio_buf, audio_buf_size);
-      priv->audio_buf.Drop ();
+      output->dropped_sample_count += priv->audio_buf.Drop ();
+      output->overrun_count++;
 
       return S_OK;
     }
@@ -1611,9 +1633,6 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
 
   hr = gst_decklink2_output_schedule_video_internal (output,
       (IGstDeckLinkVideoFrame *) frame);
-  *drop_count = output->drop_count;
-  *late_count = output->late_count;
-  *underrun_count = output->underrun_count;
 
   return hr;
 }
@@ -1657,6 +1676,10 @@ gst_decklink2_output_stop_internal (GstDeckLink2Output * self)
   self->late_count = 0;
   self->drop_count = 0;
   self->underrun_count = 0;
+  self->overrun_count = 0;
+  self->duplicate_count = 0;
+  self->dropped_sample_count = 0;
+  self->silent_sample_count = 0;
 
   return hr;
 }
@@ -2231,6 +2254,10 @@ gst_decklink2_output_configure (GstDeckLink2Output * output,
   output->drop_count = 0;
   output->late_count = 0;
   output->underrun_count = 0;
+  output->overrun_count = 0;
+  output->duplicate_count = 0;
+  output->dropped_sample_count = 0;
+  output->silent_sample_count = 0;
   output->gap_frames = 1;
   if (max_buffered > min_buffered) {
     guint gap = (max_buffered - min_buffered) / 2;
@@ -2302,9 +2329,10 @@ gst_decklink2_output_on_completed (GstDeckLink2Output * self,
           copy = self->last_frame;
           self->last_frame->AddRef ();
         }
-        priv->audio_buf.PrependSilence ();
+        self->silent_sample_count += priv->audio_buf.PrependSilence ();
         gst_decklink2_output_schedule_video_internal (self, copy);
         copy->Release ();
+        self->duplicate_count++;
       }
       self->duplicating = FALSE;
     }
