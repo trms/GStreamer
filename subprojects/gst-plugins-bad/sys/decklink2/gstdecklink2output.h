@@ -29,6 +29,24 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (GstDeckLink2Output, gst_decklink2_output,
     GST, DECKLINK2_OUTPUT, GstObject);
 
+typedef struct
+{
+  guint buffered_video;
+  guint buffered_audio;
+  GstClockTime video_running_time;
+  GstClockTime audio_running_time;
+  GstClockTime hw_time;
+  guint64 scheduled_video_frames;
+  guint64 scheduled_audio_samples;
+  guint64 late_count;
+  guint64 drop_count;
+  guint64 overrun_count;
+  guint64 underrun_count;
+  guint64 duplicate_count;
+  guint64 dropped_sample_count;
+  guint64 silent_sample_count;
+} GstDecklink2OutputStats;
+
 GstDeckLink2Output * gst_decklink2_output_new (IDeckLink * device,
                                                GstDeckLink2APILevel api_level);
 
@@ -66,9 +84,7 @@ HRESULT               gst_decklink2_output_schedule_stream  (GstDeckLink2Output 
                                                              IDeckLinkVideoFrame * frame,
                                                              guint8 *audio_buf,
                                                              gsize audio_buf_size,
-                                                             guint64 * drop_count,
-                                                             guint64 * late_count,
-                                                             guint64 * underrun_count);
+                                                             GstDecklink2OutputStats *stats);
 
 HRESULT               gst_decklink2_output_stop            (GstDeckLink2Output * output);
 
