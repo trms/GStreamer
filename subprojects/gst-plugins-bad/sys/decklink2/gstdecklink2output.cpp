@@ -2224,7 +2224,7 @@ gst_decklink2_output_configure (GstDeckLink2Output * output,
   if (audio_channels > 0) {
     GST_DEBUG_OBJECT (output, "Enabling audio");
     hr = gst_decklink2_output_enable_audio (output, bmdAudioSampleRate48kHz,
-        audio_sample_type, audio_channels, bmdAudioOutputStreamContinuous);
+        audio_sample_type, audio_channels, bmdAudioOutputStreamTimestamped);
     if (!gst_decklink2_result (hr))
       goto error;
 
