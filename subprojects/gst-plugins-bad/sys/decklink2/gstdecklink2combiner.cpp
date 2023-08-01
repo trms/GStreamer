@@ -204,7 +204,7 @@ gst_decklink2_combiner_sink_event (GstAggregator * agg,
           fps_d = 1;
         }
 
-        latency = gst_util_uint64_scale (GST_SECOND, fps_d, fps_n);
+        latency = gst_util_uint64_scale_ceil (GST_SECOND, fps_d, fps_n);
         gst_aggregator_set_latency (agg, latency, latency);
 
         gst_aggregator_set_src_caps (agg, caps);
