@@ -24,6 +24,7 @@
 
 #include "gstdecklink2combiner.h"
 #include "gstdecklink2utils.h"
+#include <string.h>
 
 GST_DEBUG_CATEGORY_STATIC (gst_decklink2_combiner_debug);
 #define GST_CAT_DEFAULT gst_decklink2_combiner_debug
@@ -48,8 +49,6 @@ struct _GstDeckLink2Combiner
   GstVideoInfo video_info;
   GstAudioInfo audio_info;
 
-  GstAdapter *audio_buffers;
-
   GstClockTime video_start_time;
   GstClockTime audio_start_time;
 
@@ -60,7 +59,6 @@ struct _GstDeckLink2Combiner
   guint64 num_audio_buffers;
 };
 
-static void gst_decklink2_combiner_dispose (GObject * object);
 static gboolean gst_decklink2_combiner_sink_event (GstAggregator * agg,
     GstAggregatorPad * pad, GstEvent * event);
 static gboolean gst_decklink2_combiner_sink_query (GstAggregator * agg,
@@ -81,12 +79,9 @@ GST_ELEMENT_REGISTER_DEFINE (decklink2combiner, "decklink2combiner",
 static void
 gst_decklink2_combiner_class_init (GstDeckLink2CombinerClass * klass)
 {
-  GObjectClass *object_class = G_OBJECT_CLASS (klass);
   GstElementClass *element_class = GST_ELEMENT_CLASS (klass);
   GstAggregatorClass *agg_class = GST_AGGREGATOR_CLASS (klass);
   GstCaps *templ_caps;
-
-  object_class->dispose = gst_decklink2_combiner_dispose;
 
   gst_element_class_add_static_pad_template_with_gtype (element_class,
       &audio_template, GST_TYPE_AGGREGATOR_PAD);
@@ -140,18 +135,6 @@ gst_decklink2_combiner_init (GstDeckLink2Combiner * self)
       GST_PAD_SINK, "template", templ, NULL);
   gst_object_unref (templ);
   gst_element_add_pad (GST_ELEMENT_CAST (self), GST_PAD_CAST (self->audio_pad));
-
-  self->audio_buffers = gst_adapter_new ();
-}
-
-static void
-gst_decklink2_combiner_dispose (GObject * object)
-{
-  GstDeckLink2Combiner *self = GST_DECKLINK2_COMBINER (object);
-
-  g_clear_object (&self->audio_buffers);
-
-  G_OBJECT_CLASS (parent_class)->dispose (object);
 }
 
 static gboolean
@@ -370,8 +353,6 @@ gst_decklink2_combiner_reset (GstDeckLink2Combiner * self)
   gst_clear_caps (&self->video_caps);
   gst_clear_caps (&self->audio_caps);
 
-  gst_adapter_clear (self->audio_buffers);
-
   gst_video_info_init (&self->video_info);
   gst_audio_info_init (&self->audio_info);
 
@@ -468,187 +449,166 @@ gst_decklink2_combiner_aggregate (GstAggregator * agg, gboolean timeout)
   GstDeckLink2Combiner *self = GST_DECKLINK2_COMBINER (agg);
   GstBuffer *video_buf = NULL;
   GstBuffer *audio_buf = NULL;
-  gsize audio_buf_size;
   GstDeckLink2AudioMeta *meta;
   GstClockTime video_running_time = GST_CLOCK_TIME_NONE;
   GstClockTime video_running_time_end = GST_CLOCK_TIME_NONE;
+  GstClockTime audio_running_time, audio_running_time_end;
+  GstSample *audio_sample;
+
+  if (gst_aggregator_pad_is_eos (self->video_pad) &&
+      gst_aggregator_pad_is_eos (self->audio_pad)) {
+    GST_DEBUG_OBJECT (self, "All EOS");
+    return GST_FLOW_EOS;
+  }
 
   video_buf = gst_aggregator_pad_peek_buffer (self->video_pad);
   if (!video_buf) {
-    if (gst_aggregator_pad_is_eos (self->video_pad)) {
-      /* Follow video stream's timeline */
-      GST_DEBUG_OBJECT (self, "Video pad is EOS");
-      return GST_FLOW_EOS;
-    }
-
-    /* Need to know video start time */
-    if (!GST_CLOCK_TIME_IS_VALID (self->video_start_time)) {
-      GST_LOG_OBJECT (self, "Waiting for first video buffer");
-      goto again;
-    }
-
-    GST_LOG_OBJECT (self, "Video is not ready");
-  } else {
-    /* Drop empty buffer */
-    if (gst_buffer_get_size (video_buf) == 0) {
-      GST_LOG_OBJECT (self, "Dropping empty video buffer");
-      gst_aggregator_pad_drop_buffer (self->video_pad);
-      goto again;
-    }
-
-    video_running_time = video_running_time_end =
-        gst_segment_to_running_time (&self->video_pad->segment,
-        GST_FORMAT_TIME, GST_BUFFER_PTS (video_buf));
-    if (GST_BUFFER_DURATION_IS_VALID (video_buf)) {
-      video_running_time_end += GST_BUFFER_DURATION (video_buf);
-    } else if (self->video_info.fps_n > 0 && self->video_info.fps_d > 0) {
-      video_running_time_end += gst_util_uint64_scale_int (GST_SECOND,
-          self->video_info.fps_d, self->video_info.fps_n);
-    } else {
-      /* XXX: shouldn't happen */
-      video_running_time_end = video_running_time;
-    }
-
-    if (!GST_CLOCK_TIME_IS_VALID (self->video_start_time)) {
-      self->video_start_time = video_running_time;
-      GST_DEBUG_OBJECT (self, "Video start time %" GST_TIME_FORMAT,
-          GST_TIME_ARGS (self->video_start_time));
-    }
-
-    self->video_running_time = video_running_time_end;
+    GST_LOG_OBJECT (self, "Waiting for video");
+    goto need_data;
   }
+
+  /* Drop empty buffer */
+  if (gst_buffer_get_size (video_buf) == 0) {
+    GST_LOG_OBJECT (self, "Dropping empty video buffer");
+    gst_aggregator_pad_drop_buffer (self->video_pad);
+    goto need_data;
+  }
+
+  video_running_time = video_running_time_end =
+      gst_segment_to_running_time (&self->video_pad->segment,
+      GST_FORMAT_TIME, GST_BUFFER_PTS (video_buf));
+  if (GST_BUFFER_DURATION_IS_VALID (video_buf)) {
+    video_running_time_end += GST_BUFFER_DURATION (video_buf);
+  } else if (self->video_info.fps_n > 0 && self->video_info.fps_d > 0) {
+    video_running_time_end += gst_util_uint64_scale_int (GST_SECOND,
+        self->video_info.fps_d, self->video_info.fps_n);
+  } else {
+    /* XXX: shouldn't happen */
+    video_running_time_end = video_running_time;
+  }
+
+  if (!GST_CLOCK_TIME_IS_VALID (self->video_start_time)) {
+    self->video_start_time = video_running_time;
+    GST_DEBUG_OBJECT (self, "Video start time %" GST_TIME_FORMAT,
+        GST_TIME_ARGS (self->video_start_time));
+  }
+
+  self->video_running_time = video_running_time_end;
 
   audio_buf = gst_aggregator_pad_peek_buffer (self->audio_pad);
   if (!audio_buf) {
-    if (gst_adapter_available (self->audio_buffers) == 0 &&
-        !gst_aggregator_pad_is_eos (self->audio_pad) &&
-        self->audio_running_time < self->video_running_time) {
-      GST_LOG_OBJECT (self, "Waiting for audio buffer");
-      goto again;
-    }
-  } else if (gst_buffer_get_size (audio_buf) == 0) {
+    GST_LOG_OBJECT (self, "Waiting for audio buffer");
+    goto need_data;
+  }
+
+  if (gst_buffer_get_size (audio_buf) == 0) {
     GST_LOG_OBJECT (self, "Dropping empty audio buffer");
     gst_aggregator_pad_drop_buffer (self->audio_pad);
-    goto again;
+    goto need_data;
+  }
+
+  audio_running_time = gst_segment_to_running_time (&self->audio_pad->segment,
+      GST_FORMAT_TIME, GST_BUFFER_PTS (audio_buf));
+  if (GST_BUFFER_DURATION_IS_VALID (audio_buf)) {
+    audio_running_time_end = audio_running_time +
+        GST_BUFFER_DURATION (audio_buf);
   } else {
-    GstClockTime audio_running_time, audio_running_time_end;
+    audio_running_time_end = gst_util_uint64_scale (GST_SECOND,
+        gst_buffer_get_size (audio_buf),
+        self->audio_info.rate * self->audio_info.bpf);
+    audio_running_time_end += audio_running_time;
+  }
 
-    audio_running_time = gst_segment_to_running_time (&self->audio_pad->segment,
-        GST_FORMAT_TIME, GST_BUFFER_PTS (audio_buf));
-    if (GST_BUFFER_DURATION_IS_VALID (audio_buf)) {
-      audio_running_time_end = audio_running_time +
-          GST_BUFFER_DURATION (audio_buf);
-    } else {
-      audio_running_time_end = gst_util_uint64_scale (GST_SECOND,
-          gst_buffer_get_size (audio_buf),
-          self->audio_info.rate * self->audio_info.bpf);
-      audio_running_time_end += audio_running_time;
-    }
+  self->audio_running_time = audio_running_time_end;
 
-    self->audio_running_time = audio_running_time_end;
+  /* Do initial video/audio align */
+  if (!GST_CLOCK_TIME_IS_VALID (self->audio_start_time)) {
+    GST_DEBUG_OBJECT (self, "Initial audio running time %" GST_TIME_FORMAT,
+        GST_TIME_ARGS (audio_running_time));
 
-    /* Do initial video/audio align */
-    if (!GST_CLOCK_TIME_IS_VALID (self->audio_start_time)) {
-      GST_DEBUG_OBJECT (self, "Initial audio running time %" GST_TIME_FORMAT,
-          GST_TIME_ARGS (audio_running_time));
+    if (audio_running_time_end <= self->video_start_time) {
+      GST_DEBUG_OBJECT (self, "audio running-time end %" GST_TIME_FORMAT
+          " < video-start-time %" GST_TIME_FORMAT,
+          GST_TIME_ARGS (self->video_start_time),
+          GST_TIME_ARGS (audio_running_time_end));
+      /* completely outside */
+      gst_aggregator_pad_drop_buffer (self->audio_pad);
+      goto need_data;
+    } else if (audio_running_time < self->video_start_time &&
+        audio_running_time_end >= self->video_start_time) {
+      /* partial overlap */
+      GstClockTime diff;
+      gsize in_samples, diff_samples;
+      GstAudioMeta *meta;
+      GstBuffer *trunc_buf;
 
-      if (audio_running_time_end <= self->video_start_time) {
-        GST_DEBUG_OBJECT (self, "audio running-time end %" GST_TIME_FORMAT
-            " < video-start-time %" GST_TIME_FORMAT,
-            GST_TIME_ARGS (self->video_start_time),
-            GST_TIME_ARGS (audio_running_time_end));
-        /* completely outside */
+      meta = gst_buffer_get_audio_meta (audio_buf);
+      in_samples = meta ? meta->samples :
+          gst_buffer_get_size (audio_buf) / self->audio_info.bpf;
+
+      diff = self->video_start_time - audio_running_time;
+      diff_samples = gst_util_uint64_scale (diff,
+          self->audio_info.rate, GST_SECOND);
+
+      GST_DEBUG_OBJECT (self, "Truncate initial audio buffer duration %"
+          GST_TIME_FORMAT, GST_TIME_ARGS (diff));
+
+      trunc_buf = gst_audio_buffer_truncate (
+          (GstBuffer *) g_steal_pointer (&audio_buf),
+          self->audio_info.bpf, diff_samples, in_samples - diff_samples);
+      gst_aggregator_pad_drop_buffer (self->audio_pad);
+      if (!trunc_buf) {
+        GST_DEBUG_OBJECT (self, "Empty truncated buffer");
         gst_aggregator_pad_drop_buffer (self->audio_pad);
-        goto again;
-      } else if (audio_running_time < self->video_start_time &&
-          audio_running_time_end >= self->video_start_time) {
-        /* partial overlap */
-        GstClockTime diff;
-        gsize in_samples, diff_samples;
-        GstAudioMeta *meta;
-        GstBuffer *trunc_buf;
+        goto need_data;
+      }
 
-        meta = gst_buffer_get_audio_meta (audio_buf);
-        in_samples = meta ? meta->samples :
-            gst_buffer_get_size (audio_buf) / self->audio_info.bpf;
+      self->audio_start_time = self->video_start_time;
+      audio_buf = trunc_buf;
+    } else if (audio_running_time >= self->video_start_time) {
+      /* fill silence if needed */
+      GstClockTime diff;
+      gsize diff_samples;
 
-        diff = self->video_start_time - audio_running_time;
+      diff = audio_running_time - self->video_start_time;
+      if (diff > 0) {
+        gsize fill_size;
+
         diff_samples = gst_util_uint64_scale (diff,
             self->audio_info.rate, GST_SECOND);
 
-        GST_DEBUG_OBJECT (self, "Truncate initial audio buffer duration %"
-            GST_TIME_FORMAT, GST_TIME_ARGS (diff));
+        fill_size = diff_samples * self->audio_info.bpf;
+        if (fill_size > 0) {
+          GstBuffer *fill_buf;
+          GstMapInfo map;
+          GstMapInfo origin_map;
 
-        trunc_buf = gst_audio_buffer_truncate (
-            (GstBuffer *) g_steal_pointer (&audio_buf),
-            self->audio_info.bpf, diff_samples, in_samples - diff_samples);
-        gst_aggregator_pad_drop_buffer (self->audio_pad);
-        if (!trunc_buf) {
-          GST_DEBUG_OBJECT (self, "Empty truncated buffer");
-          gst_aggregator_pad_drop_buffer (self->audio_pad);
-          goto again;
+          GST_DEBUG_OBJECT (self, "Fill initial %" G_GSIZE_FORMAT
+              " audio samples", diff_samples);
+
+          gst_buffer_map (audio_buf, &origin_map, GST_MAP_READ);
+
+          fill_buf = gst_buffer_new_and_alloc (fill_size + origin_map.size);
+          gst_buffer_map (fill_buf, &map, GST_MAP_WRITE);
+          gst_audio_format_info_fill_silence (self->audio_info.finfo,
+              map.data, fill_size);
+          memcpy ((guint8 *) map.data + fill_size,
+              origin_map.data, origin_map.size);
+          gst_buffer_unmap (fill_buf, &map);
+          gst_buffer_unmap (audio_buf, &origin_map);
+          gst_buffer_unref (audio_buf);
+          audio_buf = fill_buf;
         }
-
-        self->audio_start_time = self->video_start_time;
-        gst_adapter_push (self->audio_buffers, trunc_buf);
-      } else if (audio_running_time >= self->video_start_time) {
-        /* fill silence if needed */
-        GstClockTime diff;
-        gsize diff_samples;
-
-        diff = audio_running_time - self->video_start_time;
-        if (diff > 0) {
-          gsize fill_size;
-
-          diff_samples = gst_util_uint64_scale (diff,
-              self->audio_info.rate, GST_SECOND);
-
-          fill_size = diff_samples * self->audio_info.bpf;
-          if (fill_size > 0) {
-            GstBuffer *fill_buf;
-            GstMapInfo map;
-
-            GST_DEBUG_OBJECT (self, "Fill initial %" G_GSIZE_FORMAT
-                " audio samples", diff_samples);
-
-            fill_buf = gst_buffer_new_and_alloc (fill_size);
-            gst_buffer_map (fill_buf, &map, GST_MAP_WRITE);
-            gst_audio_format_info_fill_silence (self->audio_info.finfo,
-                map.data, map.size);
-            gst_buffer_unmap (fill_buf, &map);
-            gst_adapter_push (self->audio_buffers, fill_buf);
-          }
-        }
-
-        self->audio_start_time = self->video_start_time;
-
-        gst_adapter_push (self->audio_buffers,
-            (GstBuffer *) g_steal_pointer (&audio_buf));
-        gst_aggregator_pad_drop_buffer (self->audio_pad);
       }
 
-      self->num_audio_buffers++;
-    } else {
-      GST_LOG_OBJECT (self, "Pushing audio buffer to adapter, %" GST_PTR_FORMAT,
-          audio_buf);
-      gst_adapter_push (self->audio_buffers,
-          (GstBuffer *) g_steal_pointer (&audio_buf));
+      self->audio_start_time = self->video_start_time;
       gst_aggregator_pad_drop_buffer (self->audio_pad);
-
-      self->num_audio_buffers++;
     }
-  }
 
-  if (!video_buf) {
-    GST_LOG_OBJECT (self, "Waiting for video");
-    goto again;
-  } else if (!gst_aggregator_pad_is_eos (self->audio_pad) &&
-      self->audio_running_time < self->video_running_time) {
-    GST_LOG_OBJECT (self, "Waiting for audio, audio running time %"
-        GST_TIME_FORMAT " < video running time %" GST_TIME_FORMAT,
-        GST_TIME_ARGS (self->audio_running_time),
-        GST_TIME_ARGS (self->video_running_time));
-    goto again;
+    self->num_audio_buffers++;
+  } else {
+    gst_aggregator_pad_drop_buffer (self->audio_pad);
+    self->num_audio_buffers++;
   }
 
   gst_aggregator_pad_drop_buffer (self->video_pad);
@@ -662,22 +622,10 @@ gst_decklink2_combiner_aggregate (GstAggregator * agg, gboolean timeout)
     gst_buffer_remove_meta (video_buf, GST_META_CAST (meta));
   }
 
-  audio_buf_size = gst_adapter_available (self->audio_buffers);
-  if (audio_buf_size > 0) {
-    GstSample *audio_sample;
-
-    audio_buf = gst_adapter_take_buffer (self->audio_buffers, audio_buf_size);
-    audio_sample = gst_sample_new (audio_buf, self->audio_caps, NULL, NULL);
-
-    GST_LOG_OBJECT (self, "Adding meta with size %" G_GSIZE_FORMAT,
-        gst_buffer_get_size (audio_buf));
-    gst_buffer_unref (audio_buf);
-
-    gst_buffer_add_decklink2_audio_meta (video_buf, audio_sample);
-    gst_sample_unref (audio_sample);
-  } else {
-    GST_LOG_OBJECT (self, "No audio meta");
-  }
+  audio_sample = gst_sample_new (audio_buf, self->audio_caps, NULL, NULL);
+  gst_buffer_unref (audio_buf);
+  gst_buffer_add_decklink2_audio_meta (video_buf, audio_sample);
+  gst_sample_unref (audio_sample);
 
   GST_LOG_OBJECT (self, "Finish buffer %" GST_PTR_FORMAT
       ", total video/audio buffers %" GST_TIME_FORMAT
@@ -690,7 +638,7 @@ gst_decklink2_combiner_aggregate (GstAggregator * agg, gboolean timeout)
 
   return gst_aggregator_finish_buffer (agg, video_buf);
 
-again:
+need_data:
   gst_clear_buffer (&video_buf);
   gst_clear_buffer (&audio_buf);
 
