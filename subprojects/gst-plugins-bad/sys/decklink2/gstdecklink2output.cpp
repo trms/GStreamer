@@ -1623,12 +1623,11 @@ gst_decklink2_output_schedule_stream (GstDeckLink2Output * output,
           GST_TIME_ARGS (output->pts), output->n_frames, buffered_video,
           GST_TIME_ARGS (audio_running_time), output->n_samples, buffered_audio,
           GST_STIME_ARGS (diff), GST_TIME_ARGS (hw_time_gst));
-
-      /* audio and video may not be completely aligned. Add this sample
-       * and drop video frame duration amount of audio samples */
-      priv->audio_buf.Append (audio_buf, audio_buf_size);
-      output->dropped_sample_count += priv->audio_buf.Drop ();
       output->overrun_count++;
+      if (audio_buf_size > 0 && GST_AUDIO_INFO_IS_VALID (&output->audio_info)) {
+        gsize dropped_samples = audio_buf_size / output->audio_info.bpf;
+        output->dropped_sample_count += dropped_samples;
+      }
 
       return S_OK;
     }
@@ -2268,7 +2267,8 @@ gst_decklink2_output_configure (GstDeckLink2Output * output,
   output->gap_frames = 1;
   if (max_buffered > min_buffered) {
     guint gap = (max_buffered - min_buffered) / 2;
-    output->gap_frames = MAX (2, gap);
+    if (gap >= 2)
+      output->gap_frames = 2;
   }
   output->duplicating = FALSE;
 
