@@ -50,6 +50,7 @@ struct _GstStreamSelectorPad
   GstEvent *tag_event;
   gboolean active;
   gboolean discont;
+  GstClockTime duration;
 };
 
 static void gst_stream_selector_pad_dispose (GObject * object);
@@ -88,6 +89,7 @@ gst_stream_selector_pad_class_init (GstStreamSelectorPadClass * klass)
 static void
 gst_stream_selector_pad_init (GstStreamSelectorPad * self)
 {
+  self->duration = GST_CLOCK_TIME_NONE;
 }
 
 static void
@@ -534,9 +536,20 @@ gst_stream_selector_sink_event (GstAggregator * agg, GstAggregatorPad * pad,
     {
       GstCaps *caps;
       GstPad *active;
+      GstStructure *s;
+      gint fps_n, fps_d;
 
       gst_event_parse_caps (event, &caps);
       gst_caps_replace (&spad->caps, caps);
+
+      s = gst_caps_get_structure (caps, 0);
+      if (gst_structure_get_fraction (s, "framerate", &fps_n, &fps_d)
+          && fps_n > 0 && fps_d > 0) {
+        GST_DEBUG_OBJECT (pad, "Framerate %d / %d", fps_n, fps_d);
+        spad->duration = gst_util_uint64_scale (GST_SECOND, fps_d, fps_n);
+      } else {
+        spad->duration = GST_CLOCK_TIME_NONE;
+      }
 
       active = gst_stream_selector_get_active_pad (self);
       if (active) {
@@ -660,12 +673,14 @@ gst_stream_selector_aggregate (GstAggregator * agg, gboolean timeout)
   GstClockTime timestamp;
   gboolean active_eos = FALSE;
   gboolean have_non_eos_pad = FALSE;
+  GstClockTime advance_dur = GST_CLOCK_TIME_NONE;
 
   GST_OBJECT_LOCK (self);
   active_pad = (GstStreamSelectorPad *)
       gst_stream_selector_get_active_pad_unlocked (self);
   if (!active_pad) {
     GST_WARNING_OBJECT (self, "No current active pad");
+    GST_OBJECT_UNLOCK (self);
     goto need_data;
   }
 
@@ -677,6 +692,8 @@ gst_stream_selector_aggregate (GstAggregator * agg, gboolean timeout)
   } else {
     GST_LOG_OBJECT (active_pad, "Current active pad");
   }
+
+  advance_dur = active_pad->duration;
 
   active_agg_pad = GST_AGGREGATOR_PAD_CAST (active_pad);
 
@@ -779,8 +796,7 @@ gst_stream_selector_aggregate (GstAggregator * agg, gboolean timeout)
     return GST_FLOW_EOS;
   } else if (!buf) {
     GST_LOG_OBJECT (self, "Active pad is not ready");
-    gst_object_unref (active_pad);
-    return GST_AGGREGATOR_FLOW_NEED_DATA;
+    goto need_data;
   }
 
   srcpad->segment.position =
@@ -810,13 +826,22 @@ gst_stream_selector_aggregate (GstAggregator * agg, gboolean timeout)
     active_pad->discont = FALSE;
   }
 
+  GST_LOG_OBJECT (active_pad, "Finishing buffer %" GST_PTR_FORMAT
+      ", running time %" GST_TIME_FORMAT, buf,
+      GST_TIME_ARGS (running_time_end));
+
   gst_object_unref (active_pad);
 
   return gst_aggregator_finish_buffer (agg, buf);
 
 need_data:
+  if (srcpad->segment.position != -1) {
+    if (GST_CLOCK_TIME_IS_VALID (advance_dur))
+      srcpad->segment.position += advance_dur;
+    else
+      srcpad->segment.position += GST_MSECOND;
+  }
   gst_clear_object (&active_pad);
-  GST_OBJECT_UNLOCK (self);
 
   return GST_AGGREGATOR_FLOW_NEED_DATA;
 }
