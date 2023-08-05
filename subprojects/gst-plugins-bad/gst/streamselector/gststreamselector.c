@@ -716,7 +716,12 @@ gst_stream_selector_aggregate (GstAggregator * agg, gboolean timeout)
   for (iter = elem->sinkpads; iter; iter = g_list_next (iter)) {
     GstAggregatorPad *other_pad = GST_AGGREGATOR_PAD_CAST (iter->data);
     GstStreamSelectorPad *other_spad = GST_STREAM_SELECTOR_PAD (other_pad);
-    GstClockTime other_running_time =
+    GstClockTime other_running_time;
+
+    if (other_spad == active_pad)
+      continue;
+
+    other_running_time =
         gst_stream_selector_get_pad_running_time (self, other_pad);
 
     /* Drops other pad's buffer if
