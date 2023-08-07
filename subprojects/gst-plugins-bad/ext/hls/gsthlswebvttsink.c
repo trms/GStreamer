@@ -480,7 +480,8 @@ gst_hls_webvtt_sink_drain (GstHlsWebvttSink * self)
       entry_location = g_path_get_basename (self->current_location);
     } else {
       gchar *name = g_path_get_basename (self->current_location);
-      entry_location = g_build_filename (self->playlist_root, name, NULL);
+      /* g_build_filename() will insert back slash on Windows */
+      entry_location = g_build_path ("/", self->playlist_root, name, NULL);
       g_free (name);
     }
 
@@ -822,7 +823,8 @@ gst_hls_webvtt_sink_advance_playlist (GstHlsWebvttSink * self,
     entry_location = g_path_get_basename (self->current_location);
   } else {
     gchar *name = g_path_get_basename (self->current_location);
-    entry_location = g_build_filename (self->playlist_root, name, NULL);
+    /* g_build_filename() will insert back slash on Windows */
+    entry_location = g_build_path ("/", self->playlist_root, name, NULL);
     g_free (name);
   }
 
