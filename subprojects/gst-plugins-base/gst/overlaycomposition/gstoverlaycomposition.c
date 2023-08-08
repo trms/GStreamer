@@ -107,11 +107,10 @@ static gboolean gst_overlay_composition_stop (GstBaseTransform * trans);
 static gboolean
 gst_overlay_composition_propose_allocation (GstBaseTransform * trans,
     GstQuery * decide_query, GstQuery * query);
-static gboolean
-gst_overlay_composition_decide_allocation (GstBaseTransform * trans,
-    GstQuery * query);
 static GstCaps *gst_overlay_composition_transform_caps (GstBaseTransform *
     trans, GstPadDirection direction, GstCaps * caps, GstCaps * filter);
+static GstCaps *gst_overlay_composition_fixate_caps (GstBaseTransform * trans,
+    GstPadDirection direction, GstCaps * caps, GstCaps * othercaps);
 static gboolean gst_overlay_composition_set_caps (GstBaseTransform * trans,
     GstCaps * incaps, GstCaps * outcaps);
 static GstFlowReturn gst_overlay_composition_transform (GstBaseTransform *
@@ -170,10 +169,10 @@ gst_overlay_composition_class_init (GstOverlayCompositionClass * klass)
   transform_class->stop = GST_DEBUG_FUNCPTR (gst_overlay_composition_stop);
   transform_class->propose_allocation =
       GST_DEBUG_FUNCPTR (gst_overlay_composition_propose_allocation);
-  transform_class->decide_allocation =
-      GST_DEBUG_FUNCPTR (gst_overlay_composition_decide_allocation);
   transform_class->transform_caps =
       GST_DEBUG_FUNCPTR (gst_overlay_composition_transform_caps);
+  transform_class->fixate_caps =
+      GST_DEBUG_FUNCPTR (gst_overlay_composition_fixate_caps);
   transform_class->set_caps =
       GST_DEBUG_FUNCPTR (gst_overlay_composition_set_caps);
   transform_class->transform =
@@ -211,171 +210,65 @@ static gboolean
 gst_overlay_composition_propose_allocation (GstBaseTransform * trans,
     GstQuery * decide_query, GstQuery * query)
 {
-  GstOverlayComposition *self = GST_OVERLAY_COMPOSITION (trans);
-  GstCaps *caps = NULL;
-  GstCapsFeatures *features;
-
-  /* Always proxy allocation query (we don't need allocation) */
-  if (!gst_pad_peer_query (trans->srcpad, query))
+  if (!GST_BASE_TRANSFORM_CLASS (parent_class)->propose_allocation (trans,
+          decide_query, query)) {
     return FALSE;
-
-  gst_query_parse_allocation (query, &caps, NULL);
-  if (!caps)
-    return FALSE;
-
-  if (gst_query_get_n_allocation_pools (query) > 0)
-    goto done;
-
-  features = gst_caps_get_features (caps, 0);
-  if (features && gst_caps_features_contains (features,
-          GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)) {
-    GstVideoInfo info;
-    GstBufferPool *pool;
-    GstStructure *config;
-    guint size;
-
-    if (!gst_video_info_from_caps (&info, caps)) {
-      GST_ERROR_OBJECT (self, "Invalid caps %" GST_PTR_FORMAT, caps);
-      return FALSE;
-    }
-
-    pool = gst_video_buffer_pool_new ();
-    config = gst_buffer_pool_get_config (pool);
-
-    gst_buffer_pool_config_add_option (config,
-        GST_BUFFER_POOL_OPTION_VIDEO_META);
-    gst_buffer_pool_config_add_option (config,
-        GST_BUFFER_POOL_OPTION_VIDEO_ALIGNMENT);
-
-    size = GST_VIDEO_INFO_SIZE (&info);
-    gst_buffer_pool_config_set_params (config, caps, size, 0, 0);
-
-    if (!gst_buffer_pool_set_config (pool, config)) {
-      GST_ERROR_OBJECT (self, "Could not set pool config");
-      gst_object_unref (pool);
-      return FALSE;
-    }
-
-    gst_query_add_allocation_pool (query, pool, size, 0, 0);
-    gst_object_unref (pool);
   }
 
-done:
-  gst_query_add_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL);
-  /* This element always supports upstream overlay-composition meta,
-   * but checks if downstream provided it already, to preserve
-   * downstream alloc params (e.g., window width/height) */
-  if (!gst_query_find_allocation_meta (query,
-          GST_VIDEO_OVERLAY_COMPOSITION_META_API_TYPE, NULL)) {
-    gst_query_add_allocation_meta (query,
-        GST_VIDEO_OVERLAY_COMPOSITION_META_API_TYPE, NULL);
-  }
+  /* Passthrough */
+  if (!decide_query)
+    return TRUE;
 
-  return TRUE;
-}
-
-static gboolean
-gst_overlay_composition_decide_allocation (GstBaseTransform * trans,
-    GstQuery * query)
-{
-  GstOverlayComposition *self = GST_OVERLAY_COMPOSITION (trans);
-  guint alloc_index;
-
-  self->allocation_supports_meta = FALSE;
-  self->overlay_mode = OVERLAY_MODE_UNKNOWN;
-
-  if (gst_query_find_allocation_meta (query,
-          GST_VIDEO_OVERLAY_COMPOSITION_META_API_TYPE, &alloc_index)) {
-    const GstStructure *params = NULL;
-    guint width, height;
-
-    self->allocation_supports_meta = TRUE;
-
-    gst_query_parse_nth_allocation_meta (query, alloc_index, &params);
-    /* Hold params to forward it at propose_allocation() */
-    if (params && gst_structure_get (params, "width", G_TYPE_UINT, &width,
-            "height", G_TYPE_UINT, &height, NULL) && width > 0 && height > 0) {
-      GST_INFO_OBJECT (self, "received window size: %dx%d", width, height);
-
-      if (self->window_width != width || self->window_height != height)
-        self->caps_changed = TRUE;
-
-      self->window_width = width;
-      self->window_height = height;
-    }
-  }
-
-  return TRUE;
+  return gst_pad_peer_query (trans->srcpad, query);
 }
 
 static GstCaps *
 add_overlay_feature (GstCaps * caps)
 {
-  guint i, m, n;
-  GstCaps *tmp;
-  GstCapsFeatures *system_overlay_feature =
-      gst_caps_features_from_string
-      (GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY ", "
-      GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION);
+  GstCaps *new_caps = gst_caps_new_empty ();
+  guint caps_size = gst_caps_get_size (caps);
+  guint i;
 
-  tmp = gst_caps_new_empty ();
-
-  n = gst_caps_get_size (caps);
-  for (i = 0; i < n; i++) {
-    GstCapsFeatures *features, *orig_features;
+  for (i = 0; i < caps_size; i++) {
     GstStructure *s = gst_caps_get_structure (caps, i);
+    GstCapsFeatures *f =
+        gst_caps_features_copy (gst_caps_get_features (caps, i));
+    GstCaps *c = gst_caps_new_full (gst_structure_copy (s), NULL);
 
-    orig_features = gst_caps_get_features (caps, i);
-
-    if (gst_caps_features_is_any (orig_features)) {
-      features = gst_caps_features_copy (system_overlay_feature);
-    } else {
-      m = gst_caps_features_get_size (orig_features);
-      if (m == 1 && gst_caps_features_contains (orig_features,
-              GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)) {
-        features = gst_caps_features_copy (system_overlay_feature);
-      } else {
-        features = gst_caps_features_copy (orig_features);
-        if (!gst_caps_features_contains (orig_features,
-                GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION)) {
-          gst_caps_features_add (features,
-              GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION);
-        }
-      }
+    if (!gst_caps_features_is_any (f) &&
+        !gst_caps_features_contains (f,
+            GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION)) {
+      gst_caps_features_add (f,
+          GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION);
     }
 
-    gst_caps_append_structure_full (tmp, gst_structure_copy (s), features);
+    gst_caps_set_features (c, 0, f);
+    gst_caps_append (new_caps, c);
   }
 
-  gst_caps_features_free (system_overlay_feature);
-
-  return tmp;
+  return new_caps;
 }
 
 static GstCaps *
 remove_overlay_feature (GstCaps * caps)
 {
-  guint i, n;
-  GstCaps *tmp;
+  GstCaps *new_caps = gst_caps_new_empty ();
+  guint caps_size = gst_caps_get_size (caps);
+  guint i;
 
-  tmp = gst_caps_new_empty ();
-
-  n = gst_caps_get_size (caps);
-  for (i = 0; i < n; i++) {
-    GstCapsFeatures *features, *orig_features;
+  for (i = 0; i < caps_size; i++) {
     GstStructure *s = gst_caps_get_structure (caps, i);
+    GstCapsFeatures *f =
+        gst_caps_features_copy (gst_caps_get_features (caps, i));
+    GstCaps *c = gst_caps_new_full (gst_structure_copy (s), NULL);
 
-    orig_features = gst_caps_get_features (caps, i);
-    features = gst_caps_features_copy (orig_features);
-    if (!gst_caps_features_is_any (orig_features)) {
-      gst_caps_features_remove (features,
-          GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION);
-    }
-
-    gst_caps_append_structure_full (tmp, gst_structure_copy (s), features);
+    gst_caps_features_remove (f,
+        GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION);
+    gst_caps_set_features (c, 0, f);
+    gst_caps_append (new_caps, c);
   }
 
-  return tmp;
+  return new_caps;
 }
 
 static GstCaps *
@@ -388,13 +281,13 @@ gst_overlay_composition_transform_caps (GstBaseTransform * trans,
       "Transforming caps %" GST_PTR_FORMAT " in direction %s", caps,
       (direction == GST_PAD_SINK) ? "sink" : "src");
 
-  tmp = gst_caps_merge (add_overlay_feature (caps), gst_caps_ref (caps));
-  if (direction == GST_PAD_SINK)
-    tmp = gst_caps_merge (tmp, remove_overlay_feature (caps));
-
-  GST_LOG_OBJECT (trans,
-      "Modified caps %" GST_PTR_FORMAT " in direction %s", tmp,
-      (direction == GST_PAD_SINK) ? "sink" : "src");
+  if (direction == GST_PAD_SINK) {
+    tmp = add_overlay_feature (caps);
+    tmp = gst_caps_merge (tmp, gst_caps_ref (caps));
+  } else {
+    tmp = remove_overlay_feature (caps);
+    tmp = gst_caps_merge (gst_caps_ref (caps), tmp);
+  }
 
   if (filter) {
     GST_LOG_OBJECT (trans, "Filter caps %" GST_PTR_FORMAT, filter);
@@ -410,12 +303,45 @@ gst_overlay_composition_transform_caps (GstBaseTransform * trans,
   return result;
 }
 
+static GstCaps *
+gst_overlay_composition_fixate_caps (GstBaseTransform * trans,
+    GstPadDirection direction, GstCaps * caps, GstCaps * othercaps)
+{
+  GstCaps *overlay_caps = NULL;
+  guint i;
+  guint caps_size = gst_caps_get_size (othercaps);
+
+  /* Prefer overlaycomposition caps */
+  for (i = 0; i < caps_size; i++) {
+    GstCapsFeatures *f = gst_caps_get_features (othercaps, i);
+
+    if (f && !gst_caps_features_is_any (f) &&
+        gst_caps_features_contains (f,
+            GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION)) {
+      GstStructure *s = gst_caps_get_structure (othercaps, i);
+      overlay_caps = gst_caps_new_full (gst_structure_copy (s), NULL);
+      gst_caps_set_features_simple (overlay_caps, gst_caps_features_copy (f));
+      break;
+    }
+  }
+
+  if (overlay_caps) {
+    gst_caps_unref (othercaps);
+    return gst_caps_fixate (overlay_caps);
+  }
+
+  return gst_caps_fixate (othercaps);
+}
+
 static gboolean
 gst_overlay_composition_set_caps (GstBaseTransform * trans, GstCaps * incaps,
     GstCaps * outcaps)
 {
   GstOverlayComposition *self = GST_OVERLAY_COMPOSITION (trans);
   GstCapsFeatures *features;
+
+  GST_DEBUG_OBJECT (self, "Set incaps %" GST_PTR_FORMAT ", outcaps %"
+      GST_PTR_FORMAT, incaps, outcaps);
 
   self->system_memory = FALSE;
   self->downstream_supports_meta = FALSE;
