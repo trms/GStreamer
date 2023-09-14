@@ -47,6 +47,8 @@ static GstStaticPadTemplate src_templ = GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS_ANY);
 
+static void gst_stream_selector_bin_update_sync (GstStreamSelectorBin * self);
+
 enum
 {
   PROP_PAD_0,
@@ -58,6 +60,7 @@ struct _GstStreamSelectorBinPad
   GstGhostPad parent;
 
   GstPad *target;
+  GstStreamSelectorBin *bin;
 };
 
 static void gst_stream_selector_bin_pad_dispose (GObject * object);
@@ -107,8 +110,11 @@ gst_stream_selector_bin_pad_set_property (GObject * object, guint prop_id,
 {
   GstStreamSelectorBinPad *self = GST_STREAM_SELECTOR_BIN_PAD (object);
 
-  if (self->target)
+  if (self->target) {
     g_object_set_property (G_OBJECT (self->target), pspec->name, value);
+    if (prop_id == PROP_PAD_ACTIVE)
+      gst_stream_selector_bin_update_sync (self->bin);
+  }
 }
 
 static void
@@ -168,12 +174,14 @@ struct _GstStreamSelectorBin
   gboolean running;
 
   GstStreamSelectorBinSyncMode sync_mode;
+  gboolean sync_only_inactive;
 };
 
 enum
 {
   PROP_0,
   PROP_SYNC_MODE,
+  PROP_SYNC_ONLY_INACTIVE,
   /* GstAggregator */
   PROP_LATENCY,
   PROP_MIN_UPSTREAM_LATENCY,
@@ -190,6 +198,7 @@ enum
 #define DEFAULT_START_TIME_SELECTION GST_AGGREGATOR_START_TIME_SELECTION_ZERO
 #define DEFAULT_START_TIME (-1)
 #define DEFAULT_EMIT_SIGNALS FALSE
+#define DEFAULT_SYNC_ONLY_INACTIVE FALSE
 
 static void gst_stream_selector_bin_finalize (GObject * object);
 static void gst_stream_selector_bin_set_property (GObject * object,
@@ -224,6 +233,12 @@ gst_stream_selector_bin_class_init (GstStreamSelectorBinClass * klass)
           "Behavior in sync-streams mode",
           GST_TYPE_STREAM_SELECTOR_BIN_SYNC_MODE,
           DEFAULT_SYNC_MODE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (object_class, PROP_SYNC_ONLY_INACTIVE,
+      g_param_spec_boolean ("sync-only-inactive", "Sync Only Inactive",
+          "Synchronize only inactive stream with clock when \"sync-mode=clock\"",
+          DEFAULT_SYNC_ONLY_INACTIVE,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   /* GstAggregator */
   g_object_class_install_property (object_class, PROP_LATENCY,
@@ -309,6 +324,7 @@ gst_stream_selector_bin_init (GstStreamSelectorBin * self)
   gst_element_add_pad (GST_ELEMENT_CAST (self), gpad);
 
   self->sync_mode = DEFAULT_SYNC_MODE;
+  self->sync_only_inactive = DEFAULT_SYNC_ONLY_INACTIVE;
 
   g_mutex_init (&self->lock);
 }
@@ -327,6 +343,40 @@ gst_stream_selector_bin_finalize (GObject * object)
 }
 
 static void
+gst_stream_selector_bin_update_sync_unlocked (GstStreamSelectorBin * self)
+{
+  GList *iter;
+  if (self->sync_mode != GST_STREAM_SELECTOR_BIN_SYNC_MODE_CLOCK) {
+    for (iter = self->input_chains; iter; iter = g_list_next (iter)) {
+      GstStreamSelectorBinChain *chain = iter->data;
+      g_object_set (chain->clocksync, "sync", FALSE, NULL);
+    }
+  } else {
+    if (self->sync_only_inactive) {
+      for (iter = self->input_chains; iter; iter = g_list_next (iter)) {
+        GstStreamSelectorBinChain *chain = iter->data;
+        gboolean is_active;
+        g_object_get (chain->pad->target, "active", &is_active, NULL);
+        g_object_set (chain->clocksync, "sync", !is_active, NULL);
+      }
+    } else {
+      for (iter = self->input_chains; iter; iter = g_list_next (iter)) {
+        GstStreamSelectorBinChain *chain = iter->data;
+        g_object_set (chain->clocksync, "sync", TRUE, NULL);
+      }
+    }
+  }
+}
+
+static void
+gst_stream_selector_bin_update_sync (GstStreamSelectorBin * self)
+{
+  g_mutex_lock (&self->lock);
+  gst_stream_selector_bin_update_sync_unlocked (self);
+  g_mutex_unlock (&self->lock);
+}
+
+static void
 gst_stream_selector_bin_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
 {
@@ -335,18 +385,17 @@ gst_stream_selector_bin_set_property (GObject * object, guint prop_id,
   switch (prop_id) {
     case PROP_SYNC_MODE:
     {
-      GList *iter;
-      gboolean sync = FALSE;
       g_mutex_lock (&self->lock);
       self->sync_mode = g_value_get_enum (value);
-      if (self->sync_mode == GST_STREAM_SELECTOR_BIN_SYNC_MODE_CLOCK)
-        sync = TRUE;
-
-      for (iter = self->input_chains; iter; iter = g_list_next (iter)) {
-        GstStreamSelectorBinChain *chain = iter->data;
-        if (chain->clocksync)
-          g_object_set (chain->clocksync, "sync", sync, NULL);
-      }
+      gst_stream_selector_bin_update_sync_unlocked (self);
+      g_mutex_unlock (&self->lock);
+      break;
+    }
+    case PROP_SYNC_ONLY_INACTIVE:
+    {
+      g_mutex_lock (&self->lock);
+      self->sync_only_inactive = g_value_get_boolean (value);
+      gst_stream_selector_bin_update_sync_unlocked (self);
       g_mutex_unlock (&self->lock);
       break;
     }
@@ -366,6 +415,11 @@ gst_stream_selector_bin_get_property (GObject * object, guint prop_id,
     case PROP_SYNC_MODE:
       g_mutex_lock (&self->lock);
       g_value_set_enum (value, self->sync_mode);
+      g_mutex_unlock (&self->lock);
+      break;
+    case PROP_SYNC_ONLY_INACTIVE:
+      g_mutex_lock (&self->lock);
+      g_value_set_boolean (value, self->sync_only_inactive);
       g_mutex_unlock (&self->lock);
       break;
     default:
@@ -428,6 +482,7 @@ gst_stream_selector_bin_chain_new (GstStreamSelectorBin * self,
 
   binpad = GST_STREAM_SELECTOR_BIN_PAD (chain->pad);
   binpad->target = selector_pad;
+  binpad->bin = self;
 
   pad = gst_element_get_static_pad (chain->clocksync, "sink");
   gst_ghost_pad_set_target (GST_GHOST_PAD_CAST (chain->pad), pad);
@@ -466,21 +521,19 @@ gst_stream_selector_bin_request_new_pad (GstElement * elem,
   GstStreamSelectorBin *self = GST_STREAM_SELECTOR_BIN (elem);
   GstPad *selector_pad;
   GstStreamSelectorBinChain *chain;
-  gboolean sync = FALSE;
   GstPadTemplate *selector_templ;
 
   selector_templ = gst_element_get_pad_template (self->selector, "sink_%u");
-  selector_pad = gst_element_request_pad (self->selector, selector_templ, name, caps);
+  selector_pad =
+      gst_element_request_pad (self->selector, selector_templ, name, caps);
   if (!selector_pad)
     return NULL;
 
   chain = gst_stream_selector_bin_chain_new (self, selector_pad);
 
   g_mutex_lock (&self->lock);
-  if (self->sync_mode == GST_STREAM_SELECTOR_BIN_SYNC_MODE_CLOCK)
-    sync = TRUE;
-  g_object_set (chain->clocksync, "sync", sync, NULL);
   self->input_chains = g_list_append (self->input_chains, chain);
+  gst_stream_selector_bin_update_sync_unlocked (self);
   g_mutex_unlock (&self->lock);
 
   GST_DEBUG_OBJECT (chain->pad, "Created new pad");
