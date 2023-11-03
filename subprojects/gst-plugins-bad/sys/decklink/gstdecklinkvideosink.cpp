@@ -1937,7 +1937,7 @@ buffer_is_pbo_memory (GstBuffer * buffer)
   GstMemory *mem;
 
   mem = gst_buffer_peek_memory (buffer, 0);
-  if (mem->allocator
+  if (mem && mem->allocator
       && g_strcmp0 (mem->allocator->mem_type, "GLMemoryPBO") == 0)
     return TRUE;
   return FALSE;
