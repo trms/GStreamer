@@ -373,6 +373,7 @@ struct _GstDeckLink2Input
   GArray *format_table;
   GstCaps *selected_video_caps;
   GstAudioInfo audio_info;
+  GstVideoInfo video_info;
   guint max_audio_channels;
   GstCaps *selected_audio_caps;
   gboolean auto_detect;
@@ -1115,16 +1116,18 @@ gst_decklink2_input_on_format_changed (GstDeckLink2Input * self,
 
   GST_DEBUG_OBJECT (self, "Updated caps %" GST_PTR_FORMAT, caps);
 
-  self->selected_mode = new_mode;
-  self->pixel_format = pixel_format;
-
   gst_decklink2_input_pause_streams (self);
   gst_decklink2_input_enable_video (self, display_mode, pixel_format,
       bmdVideoInputEnableFormatDetection);
   gst_decklink2_input_flush_streams (self);
 
+  std::lock_guard < std::mutex > lk (priv->lock);
+  self->selected_mode = new_mode;
+  self->pixel_format = pixel_format;
+
   gst_clear_caps (&self->selected_video_caps);
   self->selected_video_caps = caps;
+  gst_video_info_from_caps (&self->video_info, self->selected_video_caps);
   self->aspect_ratio_flag = -1;
   self->discont = TRUE;
   gst_adapter_clear (self->audio_buf);
@@ -1496,6 +1499,22 @@ gst_decklink2_input_update_time_mapping (GstDeckLink2Input * self,
 }
 
 static void
+gst_decklink2_input_do_restart (GstDeckLink2Input * self)
+{
+  GstDeckLink2InputPrivate *priv = self->priv;
+
+  priv->was_restarted = true;
+  gst_decklink2_input_reset_time_mapping (self);
+  gst_decklink2_input_stop_streams (self);
+  gst_decklink2_input_flush_streams (self);
+  gst_adapter_clear (self->audio_buf);
+  self->audio_offset = INVALID_AUDIO_OFFSET;
+  self->next_audio_offset = INVALID_AUDIO_OFFSET;
+
+  gst_decklink2_input_start_streams (self);
+}
+
+static void
 gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     IDeckLinkVideoInputFrame * frame, IDeckLinkAudioInputPacket * packet)
 {
@@ -1534,14 +1553,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
       } else if (!priv->signal) {
         GST_LOG_OBJECT (self, "Got first frame, reset timing map");
         priv->signal = true;
-        priv->was_restarted = true;
-        gst_decklink2_input_reset_time_mapping (self);
-        gst_decklink2_input_stop_streams (self);
-        gst_decklink2_input_flush_streams (self);
-        gst_decklink2_input_start_streams (self);
-        gst_adapter_clear (self->audio_buf);
-        self->audio_offset = INVALID_AUDIO_OFFSET;
-        self->next_audio_offset = INVALID_AUDIO_OFFSET;
+        gst_decklink2_input_do_restart (self);
         return;
       } else {
         priv->signal = true;
@@ -1595,6 +1607,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     BMDTimeValue frame_time, frame_dur;
     IDeckLinkTimecode *timecode = NULL;
     GstClockTime pts, dur;
+    BMDPixelFormat pixel_format;
 
     hr = frame->GetBytes (&frame_data);
     if (!gst_decklink2_result (hr)) {
@@ -1602,7 +1615,32 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
       return;
     }
 
-    frame_size = frame->GetHeight () * frame->GetRowBytes ();
+    pixel_format = frame->GetPixelFormat ();
+    if (pixel_format != self->pixel_format) {
+      lk.unlock ();
+
+      GST_DEBUG_OBJECT (self, "Unexpected pixel format change %d -> %d",
+          self->pixel_format, pixel_format);
+
+      gst_decklink2_input_do_restart (self);
+      return;
+    }
+
+    auto frame_width = frame->GetWidth ();
+    auto frame_height = frame->GetHeight ();
+    if (self->video_info.width != (gint) frame_width ||
+        self->video_info.height != (gint) frame_height) {
+      lk.unlock ();
+
+      GST_WARNING_OBJECT (self, "Unexpected resolution change %dx%d -> %dx%d",
+          self->video_info.width, self->video_info.height,
+          (gint) frame_width, (gint) frame_height);
+
+      gst_decklink2_input_do_restart (self);
+      return;
+    }
+
+    frame_size = frame_height * frame->GetRowBytes ();
     buffer = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY,
         frame_data, frame_size, 0, frame_size, frame,
         (GDestroyNotify) gst_decklink2_frame_free);
@@ -2003,6 +2041,8 @@ gst_decklink2_input_start (GstDeckLink2Input * input, GstElement * client,
     GST_ERROR_OBJECT (input, "Unable to get caps from requested mode");
     goto error;
   }
+
+  gst_video_info_from_caps (&input->video_info, input->selected_video_caps);
 
   input->auto_detect = video_config->auto_detect;
   input->aspect_ratio_flag = -1;

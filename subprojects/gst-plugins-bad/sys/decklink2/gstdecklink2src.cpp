@@ -358,10 +358,12 @@ gst_decklink2_src_get_caps (GstBaseSrc * src, GstCaps * filter)
   GstDeckLink2SrcPrivate *priv = self->priv;
   GstCaps *caps;
   GstCaps *ret;
-  std::lock_guard < std::mutex > lk (priv->lock);
+  std::unique_lock < std::mutex > lk (priv->lock);
 
-  if (!self->input)
+  if (!self->input) {
+    lk.unlock ();
     return GST_BASE_SRC_CLASS (parent_class)->get_caps (src, filter);
+  }
 
   if (self->selected_caps) {
     caps = gst_caps_ref (self->selected_caps);
@@ -630,7 +632,9 @@ again:
 
   if (is_gap_buf != self->is_gap_buf) {
     self->is_gap_buf = is_gap_buf;
+    lk.unlock ();
     g_object_notify (G_OBJECT (self), "signal");
+    lk.lock ();
   }
 
   *buffer = buf;
