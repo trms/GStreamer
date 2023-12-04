@@ -51,6 +51,7 @@ enum
   PROP_MAX_BUFFERED_FRAMES,
   PROP_AUTO_RESTART,
   PROP_OUTPUT_STATS,
+  PROP_DESYNC_THRESHOLD,
 };
 
 #define DEFAULT_MODE                bmdModeUnknown
@@ -68,6 +69,7 @@ enum
 #define DEFAULT_MIN_BUFFERED_FRAMES 3
 #define DEFAULT_MAX_BUFFERED_FRAMES 14
 #define DEFAULT_AUTO_RESTART        FALSE
+#define DEFAULT_DESYNC_THRESHOLD (250 * GST_MSECOND)
 
 enum
 {
@@ -120,6 +122,7 @@ struct _GstDeckLink2Sink
   guint min_buffered_frames;
   guint max_buffered_frames;
   gboolean auto_restart;
+  GstClockTime desync_threshold;
 
   GstDecklink2OutputStats stats;
 };
@@ -255,6 +258,14 @@ gst_decklink2_sink_class_init (GstDeckLink2SinkClass * klass)
           "Output Statistics", GST_TYPE_STRUCTURE,
           (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
 
+  g_object_class_install_property (object_class, PROP_DESYNC_THRESHOLD,
+      g_param_spec_uint64 ("desync-threshold", "Desync Threshold",
+          "Maximum allowed a/v desync threshold. "
+          "If larger desync is detected, streaming will be restarted "
+          "(0 = disable auto-restart)", 0,
+          G_MAXUINT64, DEFAULT_DESYNC_THRESHOLD,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
   gst_decklink2_sink_signals[SIGNAL_RESTART] =
       g_signal_new_class_handler ("restart", G_TYPE_FROM_CLASS (klass),
       (GSignalFlags) (G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION),
@@ -333,6 +344,7 @@ gst_decklink2_sink_init (GstDeckLink2Sink * self)
   self->min_buffered_frames = DEFAULT_MIN_BUFFERED_FRAMES;
   self->max_buffered_frames = DEFAULT_MAX_BUFFERED_FRAMES;
   self->auto_restart = DEFAULT_AUTO_RESTART;
+  self->desync_threshold = DEFAULT_DESYNC_THRESHOLD;
 
   self->priv = new GstDeckLink2SinkPrivate ();
 }
@@ -401,6 +413,9 @@ gst_decklink2_sink_set_property (GObject * object, guint prop_id,
       break;
     case PROP_AUTO_RESTART:
       self->auto_restart = g_value_get_boolean (value);
+      break;
+    case PROP_DESYNC_THRESHOLD:
+      self->desync_threshold = g_value_get_uint64 (value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -489,6 +504,9 @@ gst_decklink2_sink_get_property (GObject * object, guint prop_id,
 
       break;
     }
+    case PROP_DESYNC_THRESHOLD:
+      g_value_set_uint64 (value, self->desync_threshold);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -939,6 +957,7 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
   guint8 *audio_data = NULL;
   gsize audio_data_size = 0;
   GstDecklink2OutputStats stats = { 0, };
+  gboolean do_restart = FALSE;
 
   if (!self->prepared_frame) {
     GST_ERROR_OBJECT (self, "No prepared frame");
@@ -998,13 +1017,36 @@ gst_decklink2_sink_render (GstBaseSink * sink, GstBuffer * buffer)
     return GST_FLOW_ERROR;
   }
 
+  if (self->audio_channels > 0 && self->desync_threshold != 0 &&
+      GST_CLOCK_TIME_IS_VALID (self->desync_threshold)) {
+    GstClockTime diff;
+
+    if (stats.buffered_audio_time > stats.buffered_video_time)
+      diff = stats.buffered_audio_time - stats.buffered_video_time;
+    else
+      diff = stats.buffered_video_time - stats.buffered_audio_time;
+
+    if (diff >= self->desync_threshold) {
+      GST_WARNING_OBJECT (self, "Restart output, buffered video: %"
+          GST_TIME_FORMAT ", buffered audio: %" GST_TIME_FORMAT
+          ", threshold %" GST_TIME_FORMAT,
+          GST_TIME_ARGS (stats.buffered_video_time),
+          GST_TIME_ARGS (stats.buffered_audio_time),
+          GST_TIME_ARGS (self->desync_threshold));
+      do_restart = TRUE;
+    }
+  }
+
   if (self->auto_restart && (stats.drop_count + stats.late_count >
           (guint) self->n_preroll_frames)) {
     GST_WARNING_OBJECT (self, "Restart output, drop count: %" G_GUINT64_FORMAT
         ", late cout: %" G_GUINT64_FORMAT ", underrun count: %"
         G_GUINT64_FORMAT, stats.drop_count, stats.late_count,
         stats.underrun_count);
+    do_restart = TRUE;
+  }
 
+  if (do_restart) {
     hr = gst_decklink2_output_configure (self->output, self->n_preroll_frames,
         self->min_buffered_frames, self->max_buffered_frames,
         &self->selected_mode, self->output_flags, self->profile_id,
