@@ -338,12 +338,14 @@ struct GstDeckLink2InputPrivate
   {
     signal = false;
     was_restarted = false;
+    stopping = false;
   }
 
   std::mutex lock;
   std::condition_variable cond;
   std::atomic < bool >signal;
   std::atomic < bool >was_restarted;
+  std::atomic <bool> stopping;
 };
 
 struct _GstDeckLink2Input
@@ -1078,6 +1080,9 @@ gst_decklink2_input_on_format_changed (GstDeckLink2Input * self,
   GstDeckLink2DisplayMode new_mode;
   GstCaps *caps;
   GstDeckLink2InputPrivate *priv = self->priv;
+
+  if (priv->stopping)
+    return S_OK;
 
   GST_DEBUG_OBJECT (self, "format changed, flags 0x%x", flags);
 
@@ -1918,10 +1923,16 @@ gst_decklink2_input_stop_unlocked (GstDeckLink2Input * self)
 {
   GstDeckLink2InputPrivate *priv = self->priv;
 
+  /* Temporarily unlock mutex. below API call may be blocked by callback thread
+   * which takes our mutex too */
+  priv->stopping = true;
+  priv->lock.unlock ();
   gst_decklink2_input_stop_streams (self);
   gst_decklink2_input_disable_video (self);
   gst_decklink2_input_disable_audio (self);
   gst_decklink2_input_set_callback (self, NULL);
+  priv->lock.lock ();
+  priv->stopping = false;
   gst_queue_array_clear (self->queue);
   gst_clear_caps (&self->selected_video_caps);
   gst_clear_caps (&self->selected_audio_caps);
