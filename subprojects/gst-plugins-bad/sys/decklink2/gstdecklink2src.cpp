@@ -623,6 +623,7 @@ again:
 
       return GST_FLOW_NOT_NEGOTIATED;
     }
+    lk.lock ();
   }
 
   gst_clear_caps (&caps);
