@@ -680,12 +680,7 @@ again:
           GST_STIME_FORMAT ", threshold %" GST_TIME_FORMAT,
           GST_STIME_ARGS (av_sync), GST_TIME_ARGS (self->desync_threshold));
 
-      self->running = FALSE;
-      gst_decklink2_input_stop (self->input);
-      if (!gst_decklink2_src_run_unlocked (self, TRUE)) {
-        GST_ERROR_OBJECT (self, "Couldn't restart input");
-        return GST_FLOW_ERROR;
-      }
+      gst_decklink2_input_schedule_restart (self->input);
     }
   }
 
@@ -801,8 +796,7 @@ gst_decklink2_src_restart (GstDeckLink2Src * self)
   std::lock_guard < std::mutex > lk (priv->lock);
 
   if (self->input && self->running) {
-    GST_INFO_OBJECT (self, "Stopping input for restart");
-    self->running = FALSE;
-    gst_decklink2_input_stop (self->input);
+    GST_INFO_OBJECT (self, "Scheduling restart");
+    gst_decklink2_input_schedule_restart (self->input);
   }
 }
