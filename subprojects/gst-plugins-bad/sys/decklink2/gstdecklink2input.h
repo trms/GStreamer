@@ -67,6 +67,8 @@ HRESULT             gst_decklink2_input_start (GstDeckLink2Input * input,
                                                const GstDeckLink2InputVideoConfig * video_config,
                                                const GstDeckLink2InputAudioConfig * audio_config);
 
+void                gst_decklink2_input_schedule_restart (GstDeckLink2Input * input);
+
 void                gst_decklink2_input_stop (GstDeckLink2Input * input);
 
 void                gst_decklink2_input_set_flushing (GstDeckLink2Input * input,
