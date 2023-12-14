@@ -43,9 +43,12 @@ struct _GstDeckLink2Demux
   GstPad *sink_pad;
   GstPad *video_pad;
   GstPad *audio_pad;
+  GstVideoInfo video_info;
 
   GstFlowCombiner *flow_combiner;
   GstCaps *audio_caps;
+
+  guint drop_count;
 };
 
 static void gst_decklink2_demux_finalize (GObject * object);
@@ -132,6 +135,7 @@ gst_decklink2_demux_change_state (GstElement * element,
   switch (transition) {
     case GST_STATE_CHANGE_READY_TO_PAUSED:
       gst_clear_caps (&self->audio_caps);
+      self->drop_count = 0;
       break;
     default:
       break;
@@ -163,6 +167,7 @@ gst_decklink2_demux_chain (GstPad * sinkpad, GstObject * parent,
   GstDeckLink2AudioMeta *meta;
   GstSample *audio_sample = NULL;
   GstFlowReturn ret;
+  gsize buf_size;
 
   meta = gst_buffer_get_decklink2_audio_meta (inbuf);
   if (meta) {
@@ -230,6 +235,23 @@ gst_decklink2_demux_chain (GstPad * sinkpad, GstObject * parent,
   }
 
 out:
+  buf_size = gst_buffer_get_size (inbuf);
+  if (buf_size < self->video_info.size) {
+    GST_WARNING_OBJECT (self, "Too small buffer size %" G_GSIZE_FORMAT
+        " < %" G_GSIZE_FORMAT, buf_size, self->video_info.size);
+    gst_buffer_unref (inbuf);
+    self->drop_count++;
+
+    if (self->drop_count > 30) {
+      GST_ERROR_OBJECT (self, "Too many buffers were dropped");
+      return GST_FLOW_ERROR;
+    }
+
+    return GST_FLOW_OK;
+  }
+
+  self->drop_count = 0;
+
   GST_LOG_OBJECT (self, "Pushing video buffer %" GST_PTR_FORMAT, inbuf);
   ret = gst_pad_push (self->video_pad, inbuf);
   ret = gst_flow_combiner_update_pad_flow (self->flow_combiner,
@@ -261,6 +283,8 @@ gst_decklink2_demux_sink_event (GstPad * sinkpad, GstObject * parent,
 
       gst_event_parse_caps (event, &caps);
       GST_DEBUG_OBJECT (self, "Forwarding %" GST_PTR_FORMAT, caps);
+
+      gst_video_info_from_caps (&self->video_info, caps);
 
       return gst_pad_push_event (self->video_pad, event);
     }
