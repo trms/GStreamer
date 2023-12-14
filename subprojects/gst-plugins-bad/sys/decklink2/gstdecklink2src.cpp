@@ -593,8 +593,15 @@ gst_decklink2_src_create (GstPushSrc * src, GstBuffer ** buffer)
   GstDeckLink2SrcPrivate *priv = self->priv;
   gboolean is_gap_buf = FALSE;
   GstClockTimeDiff av_sync;
+  guint retry_count = 0;
+  gsize buf_size;
 
 again:
+  if (retry_count > 30) {
+    GST_ERROR_OBJECT (self, "Too many buffers were dropped");
+    return GST_FLOW_ERROR;
+  }
+
   if (!gst_decklink2_src_run (self)) {
     GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
         ("Failed to start stream"));
@@ -605,17 +612,26 @@ again:
   if (ret != GST_FLOW_OK) {
     if (ret == GST_DECKLINK2_INPUT_FLOW_STOPPED) {
       GST_DEBUG_OBJECT (self, "Input was stopped for restarting");
+      retry_count++;
       goto again;
     }
 
     return ret;
   }
 
-  std::unique_lock < std::mutex > lk (priv->lock);
-  if (caps && !gst_caps_is_equal (caps, self->selected_caps)) {
+  if (!caps) {
+    GST_WARNING_OBJECT (self, "Buffer without caps");
+    gst_clear_buffer (&buf);
+    retry_count++;
+    goto again;
+  }
+
+  priv->lock.lock ();
+  if (!gst_caps_is_equal (caps, self->selected_caps)) {
     GST_DEBUG_OBJECT (self, "Set updated caps %" GST_PTR_FORMAT, caps);
     gst_caps_replace (&self->selected_caps, caps);
-    lk.unlock ();
+    gst_video_info_from_caps (&self->video_info, caps);
+    priv->lock.unlock ();
     if (!gst_pad_set_caps (GST_BASE_SRC_PAD (self), caps)) {
       GST_ERROR_OBJECT (self, "Couldn't set caps");
       gst_clear_buffer (&buf);
@@ -623,9 +639,9 @@ again:
 
       return GST_FLOW_NOT_NEGOTIATED;
     }
-    lk.lock ();
+  } else {
+    priv->lock.unlock ();
   }
-
   gst_clear_caps (&caps);
 
   if (GST_BUFFER_FLAG_IS_SET (buf, GST_BUFFER_FLAG_GAP))
@@ -633,11 +649,19 @@ again:
 
   if (is_gap_buf != self->is_gap_buf) {
     self->is_gap_buf = is_gap_buf;
-    lk.unlock ();
     g_object_notify (G_OBJECT (self), "signal");
-    lk.lock ();
   }
 
+  buf_size = gst_buffer_get_size (buf);
+  if (buf_size < self->video_info.size) {
+    GST_WARNING_OBJECT (self, "Too small buffer size %" G_GSIZE_FORMAT
+        " < %" G_GSIZE_FORMAT, buf_size, self->video_info.size);
+    gst_clear_buffer (&buf);
+    retry_count++;
+    goto again;
+  }
+
+  std::unique_lock < std::mutex > lk (priv->lock);
   *buffer = buf;
 
   if (self->desync_threshold != 0 &&
