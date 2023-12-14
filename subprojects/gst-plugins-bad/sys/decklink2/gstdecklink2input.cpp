@@ -339,6 +339,7 @@ struct GstDeckLink2InputPrivate
     signal = false;
     was_restarted = false;
     stopping = false;
+    need_restart = false;
   }
 
   std::mutex lock;
@@ -346,6 +347,7 @@ struct GstDeckLink2InputPrivate
   std::atomic < bool >signal;
   std::atomic < bool >was_restarted;
   std::atomic <bool> stopping;
+  std::atomic <bool> need_restart;
 };
 
 struct _GstDeckLink2Input
@@ -1503,20 +1505,27 @@ gst_decklink2_input_update_time_mapping (GstDeckLink2Input * self,
   }
 }
 
+/* Must be called with lock taken */
 static void
 gst_decklink2_input_do_restart (GstDeckLink2Input * self)
 {
   GstDeckLink2InputPrivate *priv = self->priv;
 
+  GST_DEBUG_OBJECT (self, "Restaring input");
+
   priv->was_restarted = true;
-  gst_decklink2_input_reset_time_mapping (self);
-  gst_decklink2_input_stop_streams (self);
+  priv->need_restart = false;
+  priv->lock.unlock ();
+  gst_decklink2_input_pause_streams (self);
   gst_decklink2_input_flush_streams (self);
+  gst_decklink2_input_start_streams (self);
+  priv->lock.lock ();
+
+  gst_decklink2_input_reset_time_mapping (self);
   gst_adapter_clear (self->audio_buf);
+  gst_queue_array_clear (self->queue);
   self->audio_offset = INVALID_AUDIO_OFFSET;
   self->next_audio_offset = INVALID_AUDIO_OFFSET;
-
-  gst_decklink2_input_start_streams (self);
 }
 
 static void
@@ -1538,6 +1547,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
   BMDTimeValue stream_dur;
   BMDFrameFlags flags = bmdFrameFlagDefault;
 
+  std::unique_lock < std::mutex > lk (priv->lock);
   if (frame) {
     gboolean has_signal;
     flags = frame->GetFlags ();
@@ -1566,7 +1576,13 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     }
   }
 
-  std::unique_lock < std::mutex > lk (priv->lock);
+  /* Restart requested, flush everything */
+  if (priv->need_restart) {
+    GST_DEBUG_OBJECT (self, "Restring as requested");
+    gst_decklink2_input_do_restart (self);
+    return;
+  }
+
   hr = gst_decklink2_input_get_reference_clock (self, GST_SECOND,
       &hw_now, &dummy, &dummy2);
   if (!gst_decklink2_result (hr)) {
@@ -1622,7 +1638,6 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
 
     pixel_format = frame->GetPixelFormat ();
     if (pixel_format != self->pixel_format) {
-      lk.unlock ();
 
       GST_DEBUG_OBJECT (self, "Unexpected pixel format change %d -> %d",
           self->pixel_format, pixel_format);
@@ -1635,7 +1650,6 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     auto frame_height = frame->GetHeight ();
     if (self->video_info.width != (gint) frame_width ||
         self->video_info.height != (gint) frame_height) {
-      lk.unlock ();
 
       GST_WARNING_OBJECT (self, "Unexpected resolution change %dx%d -> %dx%d",
           self->video_info.width, self->video_info.height,
@@ -1938,6 +1952,7 @@ gst_decklink2_input_stop_unlocked (GstDeckLink2Input * self)
   gst_clear_caps (&self->selected_audio_caps);
   priv->signal = false;
   priv->was_restarted = false;
+  priv->need_restart = false;
   self->skip_first_time = GST_CLOCK_TIME_NONE;
   self->start_time = GST_CLOCK_TIME_NONE;
   self->started = FALSE;
@@ -2123,6 +2138,12 @@ error:
   gst_decklink2_input_stop_unlocked (input);
   input->client = NULL;
   return E_FAIL;
+}
+
+void
+gst_decklink2_input_schedule_restart (GstDeckLink2Input * input)
+{
+  input->priv->need_restart = true;
 }
 
 void
