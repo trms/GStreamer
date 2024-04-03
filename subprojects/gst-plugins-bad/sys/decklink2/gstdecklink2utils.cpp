@@ -1054,9 +1054,26 @@ gst_decklink2_build_template_caps (GstObject * io_object,
     /* Add custom wide mode */
     switch (bdm_mode) {
       case bmdModeNTSC:
+        gst_mode_wide = gst_mode;
+        gst_mode_wide.mode = bmdModeNTSC_W;
+        gst_mode_wide.par_n = 40;
+        gst_mode_wide.par_d = 33;
+        s_wide = gst_structure_copy (s);
+        gst_structure_set (s_wide,
+            "pixel-aspect-ratio", GST_TYPE_FRACTION, 40, 33, NULL);
+        break;
       case bmdModeNTSC2398:
+        gst_mode_wide = gst_mode;
+        gst_mode_wide.mode = bmdModeNTSC2398_W;
+        gst_mode_wide.par_n = 40;
+        gst_mode_wide.par_d = 33;
+        s_wide = gst_structure_copy (s);
+        gst_structure_set (s_wide,
+            "pixel-aspect-ratio", GST_TYPE_FRACTION, 40, 33, NULL);
+        break;
       case bmdModeNTSCp:
         gst_mode_wide = gst_mode;
+        gst_mode_wide.mode = bmdModeNTSCp_W;
         gst_mode_wide.par_n = 40;
         gst_mode_wide.par_d = 33;
         s_wide = gst_structure_copy (s);
@@ -1064,8 +1081,17 @@ gst_decklink2_build_template_caps (GstObject * io_object,
             "pixel-aspect-ratio", GST_TYPE_FRACTION, 40, 33, NULL);
         break;
       case bmdModePAL:
+        gst_mode_wide = gst_mode;
+        gst_mode_wide.mode = bmdModePAL_W;
+        gst_mode_wide.par_n = 16;
+        gst_mode_wide.par_d = 11;
+        s_wide = gst_structure_copy (s);
+        gst_structure_set (s_wide,
+            "pixel-aspect-ratio", GST_TYPE_FRACTION, 16, 11, NULL);
+        break;
       case bmdModePALp:
         gst_mode_wide = gst_mode;
+        gst_mode_wide.mode = bmdModePALp_W;
         gst_mode_wide.par_n = 16;
         gst_mode_wide.par_d = 11;
         s_wide = gst_structure_copy (s);
