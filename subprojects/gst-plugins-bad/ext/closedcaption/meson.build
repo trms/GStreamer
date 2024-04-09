@@ -9,15 +9,30 @@ zvbi_sources = [
   'io-sim.c',
 ]
 
+closedcaption_sources = [
+  'gstcccombiner.c',
+  'gstccextractor.c',
+  'gstccconverter.c',
+  'gstcea608mux.c',
+  'gstclosedcaption.c',
+  'gstline21dec.c',
+  'gstcea708decoder.c',
+  'gstceaccoverlay.c',
+  'gstline21enc.c',
+  'ccutils.c',
+  'gsth264ccextractor.c',
+]
+
+extra_args = ['-DGST_USE_UNSTABLE_API']
+
 if closedcaption_dep.found()
   gstclosedcaption = library('gstclosedcaption',
-    'gstcccombiner.c', 'gstccextractor.c', 'gstccconverter.c', 'gstcea608mux.c', 'gstclosedcaption.c',
-    'gstline21dec.c', 'gstcea708decoder.c', 'gstceaccoverlay.c', 'gstline21enc.c', 'ccutils.c',
-    zvbi_sources,
-    c_args : gst_plugins_bad_args,
+    closedcaption_sources, zvbi_sources,
+    c_args : gst_plugins_bad_args + extra_args,
     link_args : noseh_link_args,
     include_directories : [configinc],
-    dependencies : [gstvideo_dep, gstbase_dep, gst_dep, closedcaption_dep, libm],
+    dependencies : [gstvideo_dep, gstbase_dep, gst_dep, closedcaption_dep, libm,
+                    gstcodecs_dep],
     install : true,
     install_dir : plugins_install_dir,
   )
