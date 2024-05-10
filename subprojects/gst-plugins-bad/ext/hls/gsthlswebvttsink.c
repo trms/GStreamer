@@ -56,6 +56,7 @@ enum
   PROP_PLAYLIST_LENGTH,
   PROP_MPEGTS_TIME_OFFSET,
   PROP_RENDER_TIMESTAMP_MAP,
+  PROP_ZERO_TIME_OFFSET,
 };
 
 enum
@@ -76,6 +77,7 @@ static guint signals[SIGNAL_LAST];
 #define DEFAULT_PLAYLIST_LENGTH 5
 #define DEFAULT_TIMESTAMP_MAP_MPEGTS 324000000
 #define DEFAULT_RENDER_TIMESTAMP_MAP TRUE
+#define DEFAULT_ZERO_TIME_OFFSET FALSE
 
 #define GST_M3U8_PLAYLIST_VERSION 3
 
@@ -99,6 +101,7 @@ struct _GstHlsWebvttSink
   gchar *timestamp_map;
   gboolean render_timestamp_map;
   guint64 running_time_in_mpegts;
+  gboolean zero_time_offset;
 
   GOutputStream *fragment_stream;
   GCancellable *cancellable;
@@ -207,6 +210,12 @@ gst_hls_webvtt_sink_class_init (GstHlsWebvttSinkClass * klass)
           DEFAULT_RENDER_TIMESTAMP_MAP,
           G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
           G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_ZERO_TIME_OFFSET,
+      g_param_spec_boolean ("zero-time-offset", "Zero Time Offset",
+          "Set zero X-TIMESTAMP-MAP and do not update it",
+          DEFAULT_ZERO_TIME_OFFSET,
+          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
+          G_PARAM_STATIC_STRINGS));
 
   signals[SIGNAL_GET_PLAYLIST_STREAM] =
       g_signal_new_class_handler ("get-playlist-stream",
@@ -253,6 +262,7 @@ gst_hls_webvtt_sink_init (GstHlsWebvttSink * self)
   self->target_duration_ns = DEFAULT_TARGET_DURATION * GST_SECOND;
   self->mpegts_time_offset = DEFAULT_TIMESTAMP_MAP_MPEGTS;
   self->render_timestamp_map = DEFAULT_RENDER_TIMESTAMP_MAP;
+  self->zero_time_offset = DEFAULT_ZERO_TIME_OFFSET;
 
   self->cancellable = g_cancellable_new ();
 
@@ -314,6 +324,9 @@ gst_hls_webvtt_sink_set_property (GObject * object, guint prop_id,
     case PROP_RENDER_TIMESTAMP_MAP:
       self->render_timestamp_map = g_value_get_boolean (value);
       break;
+    case PROP_ZERO_TIME_OFFSET:
+      self->zero_time_offset = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -350,6 +363,9 @@ gst_hls_webvtt_sink_get_property (GObject * object, guint prop_id,
       break;
     case PROP_RENDER_TIMESTAMP_MAP:
       g_value_set_boolean (value, self->render_timestamp_map);
+      break;
+    case PROP_ZERO_TIME_OFFSET:
+      g_value_set_boolean (value, self->zero_time_offset);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -631,24 +647,7 @@ gst_hls_webvtt_sink_insert_timestamp_map (GstHlsWebvttSink * self,
   gsize len;
 
   if (self->render_timestamp_map) {
-    guint64 running_time_in_mpegts;
-
-    /* Calculate mpegts time corresponding to the current buffer running time */
-    running_time_in_mpegts = GSTTIME_TO_MPEGTIME (running_time);
-    running_time_in_mpegts += self->mpegts_time_offset;
-
-    /* Then pick the 33 bits to cover rollover case */
-    running_time_in_mpegts &= 0x1ffffffff;
-
-    /* Update timestamp map on PES timestamp rollover */
-    if (running_time_in_mpegts < self->running_time_in_mpegts) {
-      GST_DEBUG_OBJECT (self, "timestamp rollover");
-      g_clear_pointer (&self->timestamp_map, g_free);
-    }
-    self->running_time_in_mpegts = running_time_in_mpegts;
-
-    if (!self->timestamp_map) {
-      GString *s = g_string_new ("X-TIMESTAMP-MAP=MPEGTS:");
+    if (!self->zero_time_offset) {
       guint64 running_time_in_mpegts;
 
       /* Calculate mpegts time corresponding to the current buffer running time */
@@ -658,10 +657,33 @@ gst_hls_webvtt_sink_insert_timestamp_map (GstHlsWebvttSink * self,
       /* Then pick the 33 bits to cover rollover case */
       running_time_in_mpegts &= 0x1ffffffff;
 
-      g_string_append_printf (s,
-          "%" G_GUINT64_FORMAT ",LOCAL:", running_time_in_mpegts);
-      /* XXX: Assume written webvtt cue timestamp is equal to buffer timestmap */
-      gst_hls_webvtt_sink_timestamp_to_string (GST_BUFFER_PTS (buf), s);
+      /* Update timestamp map on PES timestamp rollover */
+      if (running_time_in_mpegts < self->running_time_in_mpegts) {
+        GST_DEBUG_OBJECT (self, "timestamp rollover");
+        g_clear_pointer (&self->timestamp_map, g_free);
+      }
+      self->running_time_in_mpegts = running_time_in_mpegts;
+    }
+
+    if (!self->timestamp_map) {
+      GString *s = g_string_new ("X-TIMESTAMP-MAP=MPEGTS:");
+      if (self->zero_time_offset) {
+        g_string_append (s, "0,LOCAL:00:00:00.000");
+      } else {
+        guint64 running_time_in_mpegts;
+
+        /* Calculate mpegts time corresponding to the current buffer running time */
+        running_time_in_mpegts = GSTTIME_TO_MPEGTIME (running_time);
+        running_time_in_mpegts += self->mpegts_time_offset;
+
+        /* Then pick the 33 bits to cover rollover case */
+        running_time_in_mpegts &= 0x1ffffffff;
+
+        g_string_append_printf (s,
+            "%" G_GUINT64_FORMAT ",LOCAL:", running_time_in_mpegts);
+        /* XXX: Assume written webvtt cue timestamp is equal to buffer timestmap */
+        gst_hls_webvtt_sink_timestamp_to_string (GST_BUFFER_PTS (buf), s);
+      }
 
       self->timestamp_map = g_string_free (s, FALSE);
       GST_INFO_OBJECT (self,
