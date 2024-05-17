@@ -481,7 +481,7 @@ gst_file_src_get_size (GstBaseSrc * basesrc, guint64 * size)
 
 #ifdef G_OS_WIN32
   {
-    HANDLE h = (HANDLE) _get_osfhandle (_fileno (src->fp));
+    HANDLE h = gst_file_src_win32_get_osfhandle (src->fd);
     LARGE_INTEGER file_size;
 
     if (h == INVALID_HANDLE_VALUE)
@@ -529,7 +529,7 @@ gst_file_src_start (GstBaseSrc * basesrc)
 
 #ifdef G_OS_WIN32
   {
-    HANDLE h = (HANDLE) _get_osfhandle (_fileno (src->fp));
+    HANDLE h = gst_file_src_win32_get_osfhandle (src->fd);
     FILE_STANDARD_INFO file_info;
 
     if (h == INVALID_HANDLE_VALUE)
