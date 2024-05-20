@@ -444,21 +444,27 @@ gst_file_src_win32_iph (wchar_t const *exp, wchar_t const *func,
 }
 
 static HANDLE
-gst_file_src_win32_get_osfhandle (int fd)
+gst_file_src_win32_get_osfhandle (FILE * fp)
 {
   HANDLE handle;
+  int fd;
   _invalid_parameter_handler old_iph =
       _set_thread_local_invalid_parameter_handler (gst_file_src_win32_iph);
-  handle = (HANDLE) _get_osfhandle (fd);
+  fd = _fileno (fp);
+  if (fd == -1) {
+    handle = INVALID_HANDLE_VALUE;
+  } else {
+    handle = (HANDLE) _get_osfhandle (fd);
+  }
   _set_thread_local_invalid_parameter_handler (old_iph);
 
   return handle;
 }
 #else /* HAVE__SET_THREAD_LOCAL_INVALID_PARAMETER_HANDLER */
 static HANDLE
-gst_file_src_win32_get_osfhandle (int fd)
+gst_file_src_win32_get_osfhandle (FILE * fp)
 {
-  return (HANDLE) _get_osfhandle (fd);
+  return (HANDLE) _get_osfhandle (_fileno (fp));
 }
 #endif /* HAVE__SET_THREAD_LOCAL_INVALID_PARAMETER_HANDLER */
 #endif /* G_OS_WIN32 */
