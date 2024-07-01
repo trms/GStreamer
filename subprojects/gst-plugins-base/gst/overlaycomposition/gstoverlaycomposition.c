@@ -281,13 +281,8 @@ gst_overlay_composition_transform_caps (GstBaseTransform * trans,
       "Transforming caps %" GST_PTR_FORMAT " in direction %s", caps,
       (direction == GST_PAD_SINK) ? "sink" : "src");
 
-  if (direction == GST_PAD_SINK) {
-    tmp = add_overlay_feature (caps);
-    tmp = gst_caps_merge (tmp, gst_caps_ref (caps));
-  } else {
-    tmp = remove_overlay_feature (caps);
-    tmp = gst_caps_merge (gst_caps_ref (caps), tmp);
-  }
+  tmp = gst_caps_merge (add_overlay_feature (caps), gst_caps_ref (caps));
+  tmp = gst_caps_merge (tmp, remove_overlay_feature (caps));
 
   if (filter) {
     GST_LOG_OBJECT (trans, "Filter caps %" GST_PTR_FORMAT, filter);
