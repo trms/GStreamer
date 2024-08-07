@@ -1592,6 +1592,10 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
             timecodestamper->fps_n, timecodestamper->fps_d * GST_SECOND);
         guint field_count = 0;
 
+<<<<<<< HEAD
+=======
+        /* TODO: how to get field count from running time? */
+>>>>>>> 95898190d8 (timecodestamper: Add running-time source mode)
         if (timecodestamper->interlace_mode !=
             GST_VIDEO_INTERLACE_MODE_PROGRESSIVE) {
           field_count = 1;
