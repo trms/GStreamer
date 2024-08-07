@@ -189,13 +189,6 @@ gst_timecodestamper_source_get_type (void)
         "Linear timecode from an audio device", "ltc"},
     {GST_TIME_CODE_STAMPER_SOURCE_RTC,
         "Timecode from real time clock", "rtc"},
-    /**
-     * GstTimeCodeStamperSource::running-time:
-     *
-     * Buffer running time as timecode
-     *
-     * Since: 1.26
-     */
     {GST_TIME_CODE_STAMPER_SOURCE_RUNNING_TIME,
         "Buffer running time as timecode", "running-time"},
     {0, NULL, NULL},
@@ -1596,6 +1589,7 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
             timecodestamper->fps_n, timecodestamper->fps_d * GST_SECOND);
         guint field_count = 0;
 
+        /* TODO: how to get field count from running time? */
         if (timecodestamper->interlace_mode !=
             GST_VIDEO_INTERLACE_MODE_PROGRESSIVE) {
           field_count = 1;
