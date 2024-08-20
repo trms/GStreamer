@@ -45,6 +45,7 @@ struct _GstErrorIgnore {
   gboolean ignore_notlinked;
   gboolean ignore_notnegotiated;
   gboolean ignore_eos;
+  gboolean ignore_flushing;
   GstFlowReturn convert_to;
 };
 
