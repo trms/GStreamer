@@ -18028,6 +18028,18 @@
                         "type": "gboolean",
                         "writable": true
                     },
+                    "ignore-flushing": {
+                        "blurb": "Whether to ignore GST_FLOW_FLUSHING",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "false",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gboolean",
+                        "writable": true
+                    },
                     "ignore-notlinked": {
                         "blurb": "Whether to ignore GST_FLOW_NOT_LINKED",
                         "conditionally-available": false,
