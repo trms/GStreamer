@@ -490,6 +490,7 @@ gst_line_21_decoder_scan (GstLine21Decoder * self, GstVideoFrame * frame)
   gint i;
   vbi_sliced sliced[52];
   gboolean found = FALSE;
+  gboolean dual_lines = TRUE;
   guint8 *data;
 
   if (self->mode == GST_LINE_21_DECODER_MODE_DROP &&
@@ -511,13 +512,14 @@ gst_line_21_decoder_scan (GstLine21Decoder * self, GstVideoFrame * frame)
   for (; i < self->max_line_probes && i < GST_VIDEO_FRAME_HEIGHT (frame); i++) {
     gint n_lines;
     data = get_video_data (self, frame, i);
-    /* Scan until we get n_lines == 2 */
+    /* Scan until we get n_lines == 2 (or 1 if only 1 line present) */
     n_lines = vbi_raw_decode (&self->zvbi_decoder, data, sliced);
     GST_DEBUG_OBJECT (self, "i:%d n_lines:%d", i, n_lines);
-    if (n_lines == 2) {
-      GST_DEBUG_OBJECT (self, "Found 2 CC lines at offset %d", i);
+    if (n_lines == 2 || n_lines == 1) {
+      GST_DEBUG_OBJECT (self, "Found %d CC lines at offset %d", n_lines, i);
       self->line21_offset = i;
       found = TRUE;
+      dual_lines = n_lines == 2;
       break;
     } else if (i == self->line21_offset) {
       /* Otherwise if this was the previously probed line offset,
@@ -550,9 +552,11 @@ gst_line_21_decoder_scan (GstLine21Decoder * self, GstVideoFrame * frame)
     ccdata[0] |= (base_line1 < i ? i - base_line1 : 0) & 0x1f;
     ccdata[1] = sliced[0].data[0];
     ccdata[2] = sliced[0].data[1];
-    ccdata[3] |= (base_line2 < i ? i - base_line2 : 0) & 0x1f;
-    ccdata[4] = sliced[1].data[0];
-    ccdata[5] = sliced[1].data[1];
+    if (dual_lines) {
+      ccdata[3] |= (base_line2 < i ? i - base_line2 : 0) & 0x1f;
+      ccdata[4] = sliced[1].data[0];
+      ccdata[5] = sliced[1].data[1];
+    }
     gst_buffer_add_video_caption_meta (frame->buffer,
         GST_VIDEO_CAPTION_TYPE_CEA608_S334_1A, ccdata, 6);
     GST_TRACE_OBJECT (self,
