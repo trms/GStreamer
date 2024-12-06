@@ -1806,6 +1806,10 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
       goto out;
     }
 
+    if (!frame) {
+      GST_WARNING_OBJECT (self, "Received audio packet without video frame. This indicates video processing is not fast enough.");
+    }
+
     long sample_count = packet->GetSampleFrameCount ();
     if (sample_count == 0) {
       GST_DEBUG_OBJECT (self, "Empty audio packet");
