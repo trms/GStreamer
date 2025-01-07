@@ -41,6 +41,7 @@
 #include <string.h>
 
 #include <gio/gio.h>
+#include <gstring.h>
 
 GST_DEBUG_CATEGORY_STATIC (gst_hls_webvtt_sink_debug);
 #define GST_CAT_DEFAULT gst_hls_webvtt_sink_debug
@@ -641,7 +642,7 @@ gst_hls_webvtt_sink_insert_timestamp_map (GstHlsWebvttSink * self,
   };
   GstBuffer *header_buf = NULL;
   GstMapInfo map;
-  gchar *next_line = NULL;
+  guint8 *next_line = NULL;
   gsize next_line_pos = 0;
   GString *str = NULL;
   gsize len;
@@ -720,18 +721,18 @@ gst_hls_webvtt_sink_insert_timestamp_map (GstHlsWebvttSink * self,
   str = g_string_new_len (map.data, len);
 
   /* Find the first WebVTT line terminator CRLF, LF or CR */
-  next_line = strstr (map.data, "\r\n");
+  next_line = (guint8 *) strstr (map.data, "\r\n");
   if (next_line)
     next_line_pos = (next_line - map.data) + 2;
 
   if (!next_line_pos) {
-    next_line = strchr (map.data, '\n');
+    next_line = (guint8 *) strchr (map.data, '\n');
     if (next_line)
       next_line_pos = (next_line - map.data) + 1;
   }
 
   if (!next_line_pos) {
-    next_line = strchr (map.data, '\r');
+    next_line = (guint8 *) strchr (map.data, '\r');
     if (next_line)
       next_line_pos = (next_line - map.data) + 1;
   }
