@@ -390,6 +390,7 @@ struct _GstDeckLink2Input
 
   GstDeckLink2DisplayMode selected_mode;
   BMDPixelFormat pixel_format;
+  BMDPixelFormat requested_pixel_format;
   GstElement *client;
   gboolean output_cc;
   gboolean output_afd_bar;
@@ -1071,6 +1072,15 @@ gst_decklink2_input_reset_time_mapping (GstDeckLink2Input * self)
   self->next_time_mapping.den = 1;
 }
 
+static inline gboolean
+is_yuv_pixel_format (BMDPixelFormat format)
+{
+  if (format == bmdFormat8BitYUV || format == bmdFormat10BitYUV)
+    return TRUE;
+
+  return FALSE;
+}
+
 static HRESULT
 gst_decklink2_input_on_format_changed (GstDeckLink2Input * self,
     BMDVideoInputFormatChangedEvents events, IDeckLinkDisplayMode * mode,
@@ -1113,6 +1123,13 @@ gst_decklink2_input_on_format_changed (GstDeckLink2Input * self,
           display_mode, &new_mode)) {
     GST_WARNING_OBJECT (self, "Unknown display mode");
     return E_INVALIDARG;
+  }
+
+  if (self->requested_pixel_format != pixel_format &&
+      is_yuv_pixel_format (self->requested_pixel_format) &&
+      is_yuv_pixel_format (pixel_format)) {
+    GST_DEBUG_OBJECT (self, "Updating format as requested");
+    pixel_format = self->requested_pixel_format;
   }
 
   video_format = gst_decklink2_video_format_from_pixel_format (pixel_format);
@@ -2061,7 +2078,8 @@ gst_decklink2_input_start (GstDeckLink2Input * input, GstElement * client,
 
   input->client = client;
   input->selected_mode = video_config->display_mode;
-  input->pixel_format = video_config->pixel_format;
+  input->pixel_format = input->requested_pixel_format =
+      video_config->pixel_format;
   input->output_cc = video_config->output_cc;
   input->output_afd_bar = video_config->output_afd_bar;
   input->buffer_size = buffer_size;
