@@ -1140,6 +1140,17 @@ gst_decklink2_input_on_format_changed (GstDeckLink2Input * self,
 
   GST_DEBUG_OBJECT (self, "Updated caps %" GST_PTR_FORMAT, caps);
 
+  {
+    std::lock_guard < std::mutex > lk (priv->lock);
+    if (self->selected_video_caps &&
+        gst_caps_is_equal (self->selected_video_caps, caps) &&
+        self->pixel_format == pixel_format)  {
+      GST_DEBUG_OBJECT (self, "Format not changed, skipping enable video");
+      gst_caps_unref (caps);
+      return S_OK;
+    }
+  }
+
   gst_decklink2_input_pause_streams (self);
   gst_decklink2_input_enable_video (self, display_mode, pixel_format,
       bmdVideoInputEnableFormatDetection);
