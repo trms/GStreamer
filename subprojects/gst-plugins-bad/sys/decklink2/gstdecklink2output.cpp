@@ -488,6 +488,10 @@ public:
 
     num_samples = buffer_.size () / info_.bpf;
     sample_pos = pos_;
+
+    if (num_samples == 0)
+      return NULL;
+
     return &buffer_[0];
   }
 
