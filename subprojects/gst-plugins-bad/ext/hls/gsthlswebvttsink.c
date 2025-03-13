@@ -645,6 +645,7 @@ gst_hls_webvtt_sink_insert_timestamp_map (GstHlsWebvttSink * self,
   gsize next_line_pos = 0;
   GString *str = NULL;
   gsize len;
+  guint8 *tmp;
 
   if (self->render_timestamp_map) {
     if (!self->zero_time_offset) {
@@ -719,22 +720,28 @@ gst_hls_webvtt_sink_insert_timestamp_map (GstHlsWebvttSink * self,
 
   str = g_string_new_len (map.data, len);
 
+  /* Make sure null terminated */
+  tmp = g_malloc0 (map.size + 1);
+  memcpy (tmp, map.data, map.size);
+  tmp[map.size] = '\0';
+
   /* Find the first WebVTT line terminator CRLF, LF or CR */
-  next_line = (guint8 *) strstr (map.data, "\r\n");
+  next_line = (guint8 *) strstr (tmp, "\r\n");
   if (next_line)
-    next_line_pos = (next_line - map.data) + 2;
+    next_line_pos = (next_line - tmp) + 2;
 
   if (!next_line_pos) {
-    next_line = (guint8 *) strchr (map.data, '\n');
+    next_line = (guint8 *) strchr (tmp, '\n');
     if (next_line)
-      next_line_pos = (next_line - map.data) + 1;
+      next_line_pos = (next_line - tmp) + 1;
   }
 
   if (!next_line_pos) {
-    next_line = (guint8 *) strchr (map.data, '\r');
+    next_line = (guint8 *) strchr (tmp, '\r');
     if (next_line)
-      next_line_pos = (next_line - map.data) + 1;
+      next_line_pos = (next_line - tmp) + 1;
   }
+  g_free (tmp);
   gst_buffer_unmap (buf, &map);
 
   if (self->render_timestamp_map) {
