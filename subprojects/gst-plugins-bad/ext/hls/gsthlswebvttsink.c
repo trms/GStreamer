@@ -57,6 +57,7 @@ enum
   PROP_MPEGTS_TIME_OFFSET,
   PROP_RENDER_TIMESTAMP_MAP,
   PROP_ZERO_TIME_OFFSET,
+  PROP_PLAYLIST_TYPE,
 };
 
 enum
@@ -78,6 +79,7 @@ static guint signals[SIGNAL_LAST];
 #define DEFAULT_TIMESTAMP_MAP_MPEGTS 324000000
 #define DEFAULT_RENDER_TIMESTAMP_MAP TRUE
 #define DEFAULT_ZERO_TIME_OFFSET FALSE
+#define DEFAULT_PLAYLIST_TYPE GST_M3U8_PLAYLIST_TYPE_UNSPECIFIED
 
 #define GST_M3U8_PLAYLIST_VERSION 3
 
@@ -102,6 +104,7 @@ struct _GstHlsWebvttSink
   gboolean render_timestamp_map;
   guint64 running_time_in_mpegts;
   gboolean zero_time_offset;
+  GstM3U8PlaylistType playlist_type;
 
   GOutputStream *fragment_stream;
   GCancellable *cancellable;
@@ -216,6 +219,12 @@ gst_hls_webvtt_sink_class_init (GstHlsWebvttSinkClass * klass)
           DEFAULT_ZERO_TIME_OFFSET,
           G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
           G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_PLAYLIST_TYPE,
+      g_param_spec_enum ("playlist-type", "Playlist Type",
+          "The type of the playlist to use",
+          GST_TYPE_M3U8_PLAYLIST_TYPE, DEFAULT_PLAYLIST_TYPE,
+          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
+          G_PARAM_STATIC_STRINGS));
 
   signals[SIGNAL_GET_PLAYLIST_STREAM] =
       g_signal_new_class_handler ("get-playlist-stream",
@@ -263,6 +272,7 @@ gst_hls_webvtt_sink_init (GstHlsWebvttSink * self)
   self->mpegts_time_offset = DEFAULT_TIMESTAMP_MAP_MPEGTS;
   self->render_timestamp_map = DEFAULT_RENDER_TIMESTAMP_MAP;
   self->zero_time_offset = DEFAULT_ZERO_TIME_OFFSET;
+  self->playlist = DEFAULT_PLAYLIST_TYPE;
 
   self->cancellable = g_cancellable_new ();
 
@@ -327,6 +337,9 @@ gst_hls_webvtt_sink_set_property (GObject * object, guint prop_id,
     case PROP_ZERO_TIME_OFFSET:
       self->zero_time_offset = g_value_get_boolean (value);
       break;
+    case PROP_PLAYLIST_TYPE:
+      self->playlist_type = g_value_get_enum (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -366,6 +379,9 @@ gst_hls_webvtt_sink_get_property (GObject * object, guint prop_id,
       break;
     case PROP_ZERO_TIME_OFFSET:
       g_value_set_boolean (value, self->zero_time_offset);
+      break;
+    case PROP_PLAYLIST_TYPE:
+      g_value_set_enum (value, self->playlist_type);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -439,6 +455,7 @@ gst_hls_webvtt_sink_start (GstBaseSink * sink)
   self->playlist =
       gst_m3u8_playlist_new_full (GST_M3U8_PLAYLIST_VERSION,
       self->playlist_length, "%.3f");
+  self->playlist->type = self->playlist_type;
 
   g_queue_foreach (&self->old_locations, (GFunc) g_free, NULL);
   g_queue_clear (&self->old_locations);

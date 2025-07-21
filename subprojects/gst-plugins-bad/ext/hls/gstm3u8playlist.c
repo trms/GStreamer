@@ -19,18 +19,34 @@
  * Boston, MA 02110-1301, USA.
  */
 
-#include <glib.h>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include "gstm3u8playlist.h"
 #include "gsthlselements.h"
 
 #define GST_CAT_DEFAULT hls_debug
 
-enum
+GType
+gst_m3u8_playlist_type_get_type (void)
 {
-  GST_M3U8_PLAYLIST_TYPE_EVENT,
-  GST_M3U8_PLAYLIST_TYPE_VOD,
-};
+  static GType type = 0;
+  static const GEnumValue playlist_types[] = {
+    {GST_M3U8_PLAYLIST_TYPE_UNSPECIFIED, "Unspecified", "unspecified"},
+    {GST_M3U8_PLAYLIST_TYPE_EVENT, "Event", "event"},
+    {GST_M3U8_PLAYLIST_TYPE_VOD, "Vod", "vod"},
+    {0, NULL, NULL},
+  };
+
+  if (g_once_init_enter (&type)) {
+    GType _type = g_enum_register_static ("GstM3U8PlaylistType",
+        playlist_types);
+    g_once_init_leave (&type, _type);
+  }
+
+  return type;
+}
 
 typedef struct _GstM3U8Entry GstM3U8Entry;
 
@@ -83,7 +99,7 @@ gst_m3u8_playlist_new_full (guint version, guint window_size,
   playlist = g_new0 (GstM3U8Playlist, 1);
   playlist->version = version;
   playlist->window_size = window_size;
-  playlist->type = GST_M3U8_PLAYLIST_TYPE_EVENT;
+  playlist->type = GST_M3U8_PLAYLIST_TYPE_UNSPECIFIED;
   playlist->end_list = FALSE;
   playlist->entries = g_queue_new ();
 
@@ -118,9 +134,6 @@ gst_m3u8_playlist_add_entry (GstM3U8Playlist * playlist,
 
   g_return_val_if_fail (playlist != NULL, FALSE);
   g_return_val_if_fail (url != NULL, FALSE);
-
-  if (playlist->type == GST_M3U8_PLAYLIST_TYPE_VOD)
-    return FALSE;
 
   entry = gst_m3u8_entry_new (url, title, duration, discontinuous);
 
@@ -174,6 +187,20 @@ gst_m3u8_playlist_render (GstM3U8Playlist * playlist)
 
   g_string_append_printf (playlist_str, "#EXT-X-TARGETDURATION:%u\n",
       gst_m3u8_playlist_target_duration (playlist));
+
+  switch (playlist->type) {
+    case GST_M3U8_PLAYLIST_TYPE_EVENT:
+      g_string_append_printf (playlist_str, "#EXT-X-PLAYLIST-TYPE:%s\n",
+          "EVENT");
+      break;
+    case GST_M3U8_PLAYLIST_TYPE_VOD:
+      g_string_append_printf (playlist_str, "#EXT-X-PLAYLIST-TYPE::%s\n",
+          "VOD");
+      break;
+    default:
+      break;
+  }
+
   g_string_append (playlist_str, "\n");
 
   /* Entries */
