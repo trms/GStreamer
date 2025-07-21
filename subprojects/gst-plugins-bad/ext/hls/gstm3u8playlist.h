@@ -22,17 +22,27 @@
 #ifndef __GST_M3U8_PLAYLIST_H__
 #define __GST_M3U8_PLAYLIST_H__
 
-#include <glib.h>
+#include <gst/gst.h>
 
 G_BEGIN_DECLS
 
 typedef struct _GstM3U8Playlist GstM3U8Playlist;
 
+typedef enum
+{
+  GST_M3U8_PLAYLIST_TYPE_UNSPECIFIED,
+  GST_M3U8_PLAYLIST_TYPE_EVENT,
+  GST_M3U8_PLAYLIST_TYPE_VOD,
+} GstM3U8PlaylistType;
+
+#define GST_TYPE_M3U8_PLAYLIST_TYPE (gst_m3u8_playlist_type_get_type())
+GType gst_m3u8_playlist_type_get_type (void);
+
 struct _GstM3U8Playlist
 {
   guint version;
   gint window_size;
-  gint type;
+  GstM3U8PlaylistType type;
   gboolean end_list;
   guint sequence_number;
   gchar *duration_format;
