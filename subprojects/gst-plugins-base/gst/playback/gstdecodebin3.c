@@ -321,6 +321,10 @@ struct _GstDecodebin3Class
 
     gint (*select_stream) (GstDecodebin3 * dbin,
       GstStreamCollection * collection, GstStream * stream);
+
+  /* signal fired to sort the factories */
+  GValueArray *(*decoder_factory_sort) (GstDecodebin3 * dbin,
+      GstCaps * caps, GValueArray * factories);
 };
 
 /* Input of decodebin, controls input pad and parsebin */
@@ -453,6 +457,7 @@ enum
 {
   SIGNAL_SELECT_STREAM,
   SIGNAL_ABOUT_TO_FINISH,
+  SIGNAL_DECODER_FACTORY_SORT,
   LAST_SIGNAL
 };
 static guint gst_decodebin3_signals[LAST_SIGNAL] = { 0 };
@@ -569,6 +574,13 @@ gst_decodebin3_select_stream (GstDecodebin3 * dbin,
   return -1;
 }
 
+static GValueArray *
+gst_decodebin3_decoder_factory_sort (GstDecodebin3 * dbin,
+    GstCaps * caps, GValueArray * factories)
+{
+  return NULL;
+}
+
 static GstPad *gst_decodebin3_request_new_pad (GstElement * element,
     GstPadTemplate * temp, const gchar * name, const GstCaps * caps);
 static void gst_decodebin3_release_pad (GstElement * element, GstPad * pad);
@@ -638,6 +650,21 @@ _gst_int_accumulator (GSignalInvocationHint * ihint,
   return FALSE;
 }
 
+static gboolean
+_gst_array_hasvalue_accumulator (GSignalInvocationHint * ihint,
+    GValue * return_accu, const GValue * handler_return, gpointer dummy)
+{
+  gpointer array;
+
+  array = g_value_get_boxed (handler_return);
+  g_value_set_boxed (return_accu, array);
+
+  if (array != NULL)
+    return FALSE;
+
+  return TRUE;
+}
+
 static void
 gst_decodebin3_class_init (GstDecodebin3Class * klass)
 {
@@ -687,6 +714,37 @@ gst_decodebin3_class_init (GstDecodebin3Class * klass)
       g_signal_new ("about-to-finish", G_TYPE_FROM_CLASS (klass),
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0, G_TYPE_NONE);
 
+  /**
+   * GstDecodeBin3::decoder-factory-sort:
+   * @decodebin: a #GstDecodebin3
+   * @caps: a #GstCaps.
+   * @factories: A #GValueArray of possible #GstElementFactory to use.
+   *
+   * Once decodebin3 has found the possible decoder #GstElementFactory objects
+   * to try for @caps, this signal is emitted. The purpose of the signal is for
+   * the application to perform additional sorting or filtering on the decoder
+   * factory array.
+   *
+   * The callee should copy and modify @factories or return %NULL if the
+   * order should not change.
+   *
+   * >   Invocation of signal handlers stops after one signal handler has
+   * >   returned something else than %NULL. Signal handlers are invoked in
+   * >   the order they were connected in.
+   * >   Don't connect signal handlers with the #G_CONNECT_AFTER flag to this
+   * >   signal, they will never be invoked!
+   *
+   * Returns: A new sorted array of decoder #GstElementFactory objects.
+   *
+   * Since: 1.28
+   */
+  gst_decodebin3_signals[SIGNAL_DECODER_FACTORY_SORT] =
+      g_signal_new ("decoder-factory-sort", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST,
+      G_STRUCT_OFFSET (GstDecodebin3Class, decoder_factory_sort),
+      _gst_array_hasvalue_accumulator, NULL,
+      NULL, G_TYPE_VALUE_ARRAY, 2, GST_TYPE_CAPS,
+      G_TYPE_VALUE_ARRAY | G_SIGNAL_TYPE_STATIC_SCOPE);
 
   element_class->request_new_pad =
       GST_DEBUG_FUNCPTR (gst_decodebin3_request_new_pad);
@@ -717,6 +775,7 @@ gst_decodebin3_class_init (GstDecodebin3Class * klass)
   bin_klass->handle_message = gst_decodebin3_handle_message;
 
   klass->select_stream = gst_decodebin3_select_stream;
+  klass->decoder_factory_sort = gst_decodebin3_decoder_factory_sort;
 }
 
 static void
@@ -3713,17 +3772,31 @@ gst_decodebin_input_link_to_slot (DecodebinInputStream * input_stream)
   slot->input = input_stream;
 }
 
-static GList *
+static GValueArray *
 create_decoder_factory_list (GstDecodebin3 * dbin, GstCaps * caps)
 {
-  GList *res;
+  GList *list, *tmp;
+  GValueArray *result;
 
   g_mutex_lock (&dbin->factories_lock);
   gst_decode_bin_update_factories_list (dbin);
-  res = gst_element_factory_list_filter (dbin->decoder_factories,
+  list = gst_element_factory_list_filter (dbin->decoder_factories,
       caps, GST_PAD_SINK, TRUE);
   g_mutex_unlock (&dbin->factories_lock);
-  return res;
+
+  result = g_value_array_new (g_list_length (list));
+  for (tmp = list; tmp; tmp = tmp->next) {
+    GstElementFactory *factory = GST_ELEMENT_FACTORY_CAST (tmp->data);
+    GValue val = G_VALUE_INIT;
+
+    g_value_init (&val, G_TYPE_OBJECT);
+    g_value_set_object (&val, factory);
+    g_value_array_append (result, &val);
+    g_value_unset (&val);
+  }
+  gst_plugin_feature_list_free (list);
+
+  return result;
 }
 
 static GstPadProbeReturn
@@ -3848,7 +3921,9 @@ db_output_stream_setup_decoder (DecodebinOutputStream * output,
   gboolean ret = TRUE;
   GstDecodebin3 *dbin = output->dbin;
   MultiQueueSlot *slot = output->slot;
-  GList *factories, *next_factory;
+  GValueArray *factories = NULL;
+  GValueArray *result = NULL;
+  guint i;
 
   GST_DEBUG_OBJECT (dbin, "output %s:%s caps %" GST_PTR_FORMAT,
       GST_DEBUG_PAD_NAME (output->src_pad), new_caps);
@@ -3859,20 +3934,28 @@ db_output_stream_setup_decoder (DecodebinOutputStream * output,
     goto done;
   }
 
-  factories = next_factory = create_decoder_factory_list (dbin, new_caps);
-  if (!next_factory) {
+  factories = create_decoder_factory_list (dbin, new_caps);
+  g_signal_emit (dbin, gst_decodebin3_signals[SIGNAL_DECODER_FACTORY_SORT], 0,
+      new_caps, factories, &result);
+  if (result) {
+    g_value_array_free (factories);
+    factories = result;
+  }
+
+  if (factories->n_values == 0) {
     GST_DEBUG ("Could not find an element for caps %" GST_PTR_FORMAT, new_caps);
     g_assert (output->decoder == NULL);
     ret = FALSE;
     goto missing_decoder;
   }
 
-  while (next_factory) {
+  for (i = 0; i < factories->n_values; i++) {
     CandidateDecoder *candidate = NULL;
+    GstElementFactory *factory =
+        g_value_get_object (g_value_array_get_nth (factories, i));
 
     /* If we don't have a decoder yet, instantiate one */
-    output->decoder = gst_element_factory_create (
-        (GstElementFactory *) next_factory->data, NULL);
+    output->decoder = gst_element_factory_create (factory, NULL);
     GST_DEBUG ("Trying decoder %" GST_PTR_FORMAT, output->decoder);
 
     if (output->decoder == NULL)
@@ -3928,16 +4011,14 @@ db_output_stream_setup_decoder (DecodebinOutputStream * output,
       if (candidate)
         remove_candidate_decoder (dbin, candidate);
 
-      if (!next_factory->next) {
+      if (i + 1 == factories->n_values) {
         ret = FALSE;
         if (output->decoder == NULL)
           goto missing_decoder;
         goto cleanup;
       }
-      next_factory = next_factory->next;
     }
   }
-  gst_plugin_feature_list_free (factories);
 
 done:
   if (output->type & GST_STREAM_TYPE_VIDEO && slot->drop_probe_id == 0) {
@@ -3955,6 +4036,8 @@ done:
 
   if (output->decoder)
     gst_element_sync_state_with_parent (output->decoder);
+
+  g_clear_pointer (&factories, g_value_array_free);
 
   return ret;
 
@@ -3989,6 +4072,9 @@ cleanup:
       gst_bin_remove ((GstBin *) dbin, output->decoder);
       output->decoder = NULL;
     }
+
+    g_clear_pointer (&factories, g_value_array_free);
+
     return ret;
   }
 }
