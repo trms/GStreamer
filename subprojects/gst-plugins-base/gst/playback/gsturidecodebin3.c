@@ -251,6 +251,7 @@ struct _GstURIDecodeBin3
   gulong db_pad_removed_id;
   gulong db_select_stream_id;
   gulong db_about_to_finish_id;
+  gulong db_decoder_factory_sort_id;
 
   /* 1 if shutting down */
   gint shutdown;
@@ -269,12 +270,23 @@ gst_uridecodebin3_select_stream (GstURIDecodeBin3 * dbin,
   return -1;
 }
 
+static GValueArray *
+gst_uridecodebin3_decoder_factory_sort (GstURIDecodeBin3 * dbin,
+    GstCaps * caps, GValueArray * factories)
+{
+  return NULL;
+}
+
 struct _GstURIDecodeBin3Class
 {
   GstBinClass parent_class;
 
     gint (*select_stream) (GstURIDecodeBin3 * dbin,
       GstStreamCollection * collection, GstStream * stream);
+
+  /* signal fired to sort the factories */
+  GValueArray *(*decoder_factory_sort) (GstURIDecodeBin3 * dbin,
+      GstCaps * caps, GValueArray * factories);
 };
 
 GST_DEBUG_CATEGORY_STATIC (gst_uri_decode_bin3_debug);
@@ -286,6 +298,7 @@ enum
   SIGNAL_SELECT_STREAM,
   SIGNAL_SOURCE_SETUP,
   SIGNAL_ABOUT_TO_FINISH,
+  SIGNAL_DECODER_FACTORY_SORT,
   LAST_SIGNAL
 };
 
@@ -405,6 +418,20 @@ _gst_int_accumulator (GSignalInvocationHint * ihint,
   return FALSE;
 }
 
+static gboolean
+_gst_array_hasvalue_accumulator (GSignalInvocationHint * ihint,
+    GValue * return_accu, const GValue * handler_return, gpointer dummy)
+{
+  gpointer array;
+
+  array = g_value_get_boxed (handler_return);
+  g_value_set_boxed (return_accu, array);
+
+  if (array != NULL)
+    return FALSE;
+
+  return TRUE;
+}
 
 static void
 gst_uri_decode_bin3_class_init (GstURIDecodeBin3Class * klass)
@@ -573,6 +600,37 @@ gst_uri_decode_bin3_class_init (GstURIDecodeBin3Class * klass)
       g_signal_new ("about-to-finish", G_TYPE_FROM_CLASS (klass),
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0, G_TYPE_NONE);
 
+  /**
+   * GstURIDecodeBin3::decoder-factory-sort:
+   * @decodebin: a #GstURIDecodebin3
+   * @caps: a #GstCaps.
+   * @factories: A #GValueArray of possible #GstElementFactory to use.
+   *
+   * Once decodebin3 has found the possible decoder #GstElementFactory objects
+   * to try for @caps, this signal is emitted. The purpose of the signal is for
+   * the application to perform additional sorting or filtering on the decoder
+   * factory array.
+   *
+   * The callee should copy and modify @factories or return %NULL if the
+   * order should not change.
+   *
+   * >   Invocation of signal handlers stops after one signal handler has
+   * >   returned something else than %NULL. Signal handlers are invoked in
+   * >   the order they were connected in.
+   * >   Don't connect signal handlers with the #G_CONNECT_AFTER flag to this
+   * >   signal, they will never be invoked!
+   *
+   * Returns: A new sorted array of decoder #GstElementFactory objects.
+   *
+   * Since: 1.28
+   */
+  gst_uri_decode_bin3_signals[SIGNAL_DECODER_FACTORY_SORT] =
+      g_signal_new ("decoder-factory-sort", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST,
+      G_STRUCT_OFFSET (GstURIDecodeBin3Class, decoder_factory_sort),
+      _gst_array_hasvalue_accumulator, NULL,
+      NULL, G_TYPE_VALUE_ARRAY, 2, GST_TYPE_CAPS,
+      G_TYPE_VALUE_ARRAY | G_SIGNAL_TYPE_STATIC_SCOPE);
 
   gst_element_class_add_static_pad_template (gstelement_class,
       &video_src_template);
@@ -593,6 +651,7 @@ gst_uri_decode_bin3_class_init (GstURIDecodeBin3Class * klass)
   gstbin_class->handle_message = gst_uri_decode_bin3_handle_message;
 
   klass->select_stream = gst_uridecodebin3_select_stream;
+  klass->decoder_factory_sort = gst_uridecodebin3_decoder_factory_sort;
 }
 
 static void
@@ -885,6 +944,21 @@ db_about_to_finish_cb (GstElement * decodebin, GstURIDecodeBin3 * uridecodebin)
   emit_and_handle_about_to_finish (uridecodebin, uridecodebin->output_item);
 }
 
+static GValueArray *
+db_decoder_factory_sort_cb (GstElement * decodebin,
+    GstCaps * caps, GValueArray * factories, GstURIDecodeBin3 * uridecodebin)
+{
+  GValueArray *result;
+
+  g_signal_emit (uridecodebin,
+      gst_uri_decode_bin3_signals[SIGNAL_DECODER_FACTORY_SORT], 0, caps,
+      factories, &result);
+
+  GST_DEBUG_OBJECT (uridecodebin, "decoder-factory-sort returned %p", result);
+
+  return result;
+}
+
 static void
 gst_uri_decode_bin3_init (GstURIDecodeBin3 * dec)
 {
@@ -915,6 +989,9 @@ gst_uri_decode_bin3_init (GstURIDecodeBin3 * dec)
   dec->db_about_to_finish_id =
       g_signal_connect (dec->decodebin, "about-to-finish",
       G_CALLBACK (db_about_to_finish_cb), dec);
+  dec->db_decoder_factory_sort_id =
+      g_signal_connect (dec->decodebin, "decoder-factory-sort",
+      G_CALLBACK (db_decoder_factory_sort_cb), dec);
 
   GST_OBJECT_FLAG_SET (dec, GST_ELEMENT_FLAG_SOURCE);
   gst_bin_set_suppressed_flags (GST_BIN (dec),
