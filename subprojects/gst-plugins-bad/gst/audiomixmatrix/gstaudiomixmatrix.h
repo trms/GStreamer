@@ -58,11 +58,20 @@ struct _GstAudioMixMatrix
   gdouble *matrix;
   guint64 channel_mask;
   GstAudioMixMatrixMode mode;
-  gint32 *s16_conv_matrix;
-  gint64 *s32_conv_matrix;
-  gint shift_bytes;
+  gint shift_bytes_s16;
+  gint shift_bytes_s32;
 
-  GstAudioFormat format;
+  GstAudioInfo info;
+
+  /* sparse-matrix optimization */
+  guint num_valid_out_ch;
+  guint *out_ch_lut;
+  guint *in_offset;
+  guint *in_count;
+  guint *in_lut;
+  gint32 *opt_matrix_s16;
+  gint64 *opt_matrix_s32;
+  gdouble *opt_matrix_f64;
 };
 
 struct _GstAudioMixMatrixClass
