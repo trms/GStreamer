@@ -1462,6 +1462,8 @@ gst_video_aggregator_pad_sink_getcaps (GstPad * pad, GstVideoAggregator * vagg,
       gst_structure_remove_fields (s, "colorimetry", "chroma-site", "format",
           "pixel-aspect-ratio", NULL);
     }
+
+    gst_structure_remove_fields (s, "interlace-mode", NULL);
   }
 
   if (filter) {
@@ -2773,6 +2775,8 @@ gst_video_aggregator_pad_sink_acceptcaps (GstPad * pad,
       gst_structure_remove_fields (s, "colorimetry", "chroma-site", "format",
           "pixel-aspect-ratio", NULL);
     }
+
+    gst_structure_remove_fields (s, "interlace-mode", NULL);
   }
 
   ret = gst_caps_can_intersect (caps, accepted_caps);
