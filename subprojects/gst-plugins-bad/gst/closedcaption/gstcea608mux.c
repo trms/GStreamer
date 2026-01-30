@@ -216,17 +216,14 @@ out:
 static GstFlowReturn
 finish_s334_both_fields (GstCea608Mux * self)
 {
-  GstClockTime output_pts = gst_util_uint64_scale_int (GST_SECOND,
-      self->cdp_fps_entry->fps_d * self->n_output_buffers,
-      self->cdp_fps_entry->fps_n);
   GstClockTime output_duration =
       gst_util_uint64_scale_int (GST_SECOND, self->cdp_fps_entry->fps_d,
       self->cdp_fps_entry->fps_n);
+  GstClockTime output_pts =
+      self->start_time + output_duration * self->n_output_buffers;
   GstBuffer *output = gst_buffer_new_allocate (NULL, MAX_CDP_PACKET_LEN, NULL);
   GstSegment *agg_segment =
       &GST_AGGREGATOR_PAD (GST_AGGREGATOR (self)->srcpad)->segment;
-
-  output_pts += self->start_time;
 
   take_s334_both_fields (self, output);
   GST_BUFFER_PTS (output) = output_pts;
