@@ -1697,6 +1697,7 @@ gst_aggregator_flush (GstAggregator * self)
   GST_OBJECT_LOCK (self);
   priv->send_segment = TRUE;
   priv->flushing = FALSE;
+  priv->first_buffer = TRUE;
   GST_OBJECT_UNLOCK (self);
   if (klass->flush)
     ret = klass->flush (self);
