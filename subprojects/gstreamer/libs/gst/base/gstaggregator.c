@@ -1683,7 +1683,8 @@ gst_aggregator_start_srcpad_task (GstAggregator * self)
 
   self->priv->running = TRUE;
   gst_pad_start_task (GST_PAD (self->srcpad),
-      (GstTaskFunction) gst_aggregator_aggregate_func, self, NULL);
+      (GstTaskFunction) gst_aggregator_aggregate_func, gst_object_ref (self),
+      gst_object_unref);
 }
 
 static GstFlowReturn

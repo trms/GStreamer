@@ -1005,7 +1005,8 @@ gst_amc_audio_dec_set_format (GstAudioDecoder * decoder, GstCaps * caps)
   self->flushing = FALSE;
   self->downstream_flow_ret = GST_FLOW_OK;
   gst_pad_start_task (GST_AUDIO_DECODER_SRC_PAD (self),
-      (GstTaskFunction) gst_amc_audio_dec_loop, decoder, NULL);
+      (GstTaskFunction) gst_amc_audio_dec_loop, gst_object_ref (decoder),
+      gst_object_unref);
 
   return TRUE;
 }
@@ -1045,7 +1046,8 @@ gst_amc_audio_dec_flush (GstAudioDecoder * decoder, gboolean hard)
   self->drained = TRUE;
   self->downstream_flow_ret = GST_FLOW_OK;
   gst_pad_start_task (GST_AUDIO_DECODER_SRC_PAD (self),
-      (GstTaskFunction) gst_amc_audio_dec_loop, decoder, NULL);
+      (GstTaskFunction) gst_amc_audio_dec_loop, gst_object_ref (decoder),
+      gst_object_unref);
 
   GST_DEBUG_OBJECT (self, "Reset decoder");
 }
