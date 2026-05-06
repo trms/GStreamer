@@ -169,7 +169,7 @@ public:
   /* IUnknown */
   HRESULT STDMETHODCALLTYPE QueryInterface (REFIID riid, void **object)
   {
-    if (riid == IID_IDeckLinkVideoOutputCallback) {
+    if (riid == IID_IDeckLinkVideoFrame) {
       *object = static_cast < IDeckLinkVideoFrame * >(this);
     } else {
       *object = NULL;
