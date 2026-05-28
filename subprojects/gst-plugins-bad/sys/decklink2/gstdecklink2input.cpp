@@ -52,7 +52,7 @@ public:
   /* IUnknown */
   HRESULT STDMETHODCALLTYPE QueryInterface (REFIID riid, void **object)
   {
-    if (riid == IID_IDeckLinkInputCallback) {
+    if (riid == IID_IDeckLinkMemoryAllocator) {
       *object = static_cast < IDeckLinkMemoryAllocator * >(this);
     } else {
       *object = NULL;
@@ -201,7 +201,7 @@ public:
   /* IUnknown */
   HRESULT STDMETHODCALLTYPE QueryInterface (REFIID riid, void **object)
   {
-    if (riid == IID_IDeckLinkInputCallback) {
+    if (riid == IID_IDeckLinkInputCallback_v11_5_1) {
       *object = static_cast < IGstDeckLinkInputCallback_v11_5_1 * >(this);
     } else {
       *object = NULL;
