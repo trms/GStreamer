@@ -38,7 +38,6 @@
 #endif
 
 #include <gst/gst.h>
-#include <glib/gstdio.h>
 #include "gstfilesrc.h"
 #include "gstcoreelementselements.h"
 
@@ -52,6 +51,10 @@
  * variants, so explicitly define it that way. */
 #undef lseek
 #define lseek _lseeki64
+#ifndef HAVE_FSEEKO
+/* fseeko is not defined in Windows SDK's stdio.h */
+#define fseeko _fseeki64
+#endif
 #undef off_t
 #define off_t guint64
 /* Prevent stat.h from defining the stat* functions as
@@ -113,11 +116,13 @@ enum
 };
 
 #define DEFAULT_BLOCKSIZE       4*1024
+#define DEFAULT_BUFFER_SIZE     20*1024*1024
 
 enum
 {
   PROP_0,
-  PROP_LOCATION
+  PROP_LOCATION,
+  PROP_BUFFER_SIZE,
 };
 
 static void gst_file_src_finalize (GObject * object);
@@ -166,6 +171,24 @@ gst_file_src_class_init (GstFileSrcClass * klass)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
           GST_PARAM_MUTABLE_READY));
 
+  /**
+   * GstFileSrc:buffer-size:
+   *
+   * Size of the buffer passed to setvbuf POSIX function. Depending on system,
+   * or read pattern (e.g., sequencial or randon-access), larger buffer size can
+   * improve throughput or reduce file access overhead.
+   *
+   * Since: 1.22
+   */
+  g_object_class_install_property (gobject_class, PROP_BUFFER_SIZE,
+      g_param_spec_uint ("buffer-size", "Buffer Size",
+          "Size of the buffer passed to setvbuf(). If a non-zero value is set, "
+          "it will be rounded down to the nearest multiple of 2.",
+          /* NOTE: allowed max size on Windows is INT_MAX */
+          0, G_MAXINT32, DEFAULT_BUFFER_SIZE,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+          GST_PARAM_MUTABLE_READY));
+
   gobject_class->finalize = gst_file_src_finalize;
 
   gst_element_class_set_static_metadata (gstelement_class,
@@ -190,11 +213,7 @@ gst_file_src_class_init (GstFileSrcClass * klass)
 static void
 gst_file_src_init (GstFileSrc * src)
 {
-  src->filename = NULL;
-  src->fd = 0;
-  src->uri = NULL;
-
-  src->is_regular = FALSE;
+  src->buffer_size = DEFAULT_BUFFER_SIZE;
 
   gst_base_src_set_blocksize (GST_BASE_SRC (src), DEFAULT_BLOCKSIZE);
 }
@@ -206,6 +225,7 @@ gst_file_src_finalize (GObject * object)
 
   src = GST_FILE_SRC (object);
 
+  g_free (src->buffer);
   g_free (src->filename);
   g_free (src->uri);
 
@@ -273,6 +293,11 @@ gst_file_src_set_property (GObject * object, guint prop_id,
     case PROP_LOCATION:
       gst_file_src_set_location (src, g_value_get_string (value), NULL);
       break;
+    case PROP_BUFFER_SIZE:
+      src->buffer_size = g_value_get_uint (value);
+      if (src->buffer_size > 0)
+        src->buffer_size = GST_ROUND_DOWN_2 (src->buffer_size);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -292,6 +317,9 @@ gst_file_src_get_property (GObject * object, guint prop_id, GValue * value,
   switch (prop_id) {
     case PROP_LOCATION:
       g_value_set_string (value, src->filename);
+      break;
+    case PROP_BUFFER_SIZE:
+      g_value_set_uint (value, src->buffer_size);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -315,7 +343,7 @@ gst_file_src_fill (GstBaseSrc * basesrc, guint64 offset, guint length,
 {
   GstFileSrc *src;
   guint to_read, bytes_read;
-  int ret;
+  gsize ret;
   GstMapInfo info;
   guint8 *data;
 
@@ -324,8 +352,8 @@ gst_file_src_fill (GstBaseSrc * basesrc, guint64 offset, guint length,
   if (G_UNLIKELY (offset != -1 && src->read_position != offset)) {
     off_t res;
 
-    res = lseek (src->fd, offset, SEEK_SET);
-    if (G_UNLIKELY (res == (off_t) - 1 || res != offset))
+    res = fseeko (src->fp, offset, SEEK_SET);
+    if (G_UNLIKELY (res != 0))
       goto seek_failed;
 
     src->read_position = offset;
@@ -341,7 +369,7 @@ gst_file_src_fill (GstBaseSrc * basesrc, guint64 offset, guint length,
     GST_LOG_OBJECT (src, "Reading %d bytes at offset 0x%" G_GINT64_MODIFIER "x",
         to_read, offset + bytes_read);
     errno = 0;
-    ret = read (src->fd, data + bytes_read, to_read);
+    ret = fread (data + bytes_read, 1, to_read, src->fp);
     if (G_UNLIKELY (ret < 0)) {
       if (errno == EAGAIN || errno == EINTR)
         continue;
@@ -416,21 +444,27 @@ gst_file_src_win32_iph (wchar_t const *exp, wchar_t const *func,
 }
 
 static HANDLE
-gst_file_src_win32_get_osfhandle (int fd)
+gst_file_src_win32_get_osfhandle (FILE * fp)
 {
   HANDLE handle;
+  int fd;
   _invalid_parameter_handler old_iph =
       _set_thread_local_invalid_parameter_handler (gst_file_src_win32_iph);
-  handle = (HANDLE) _get_osfhandle (fd);
+  fd = _fileno (fp);
+  if (fd == -1) {
+    handle = INVALID_HANDLE_VALUE;
+  } else {
+    handle = (HANDLE) _get_osfhandle (fd);
+  }
   _set_thread_local_invalid_parameter_handler (old_iph);
 
   return handle;
 }
 #else /* HAVE__SET_THREAD_LOCAL_INVALID_PARAMETER_HANDLER */
 static HANDLE
-gst_file_src_win32_get_osfhandle (int fd)
+gst_file_src_win32_get_osfhandle (FILE * fp)
 {
-  return (HANDLE) _get_osfhandle (fd);
+  return (HANDLE) _get_osfhandle (_fileno (fp));
 }
 #endif /* HAVE__SET_THREAD_LOCAL_INVALID_PARAMETER_HANDLER */
 #endif /* G_OS_WIN32 */
@@ -447,38 +481,39 @@ gst_file_src_get_size (GstBaseSrc * basesrc, guint64 * size)
      * succeed, and wrongly say our length is zero. */
     return FALSE;
   }
+
+  if (!src->fp)
+    return FALSE;
+
 #ifdef G_OS_WIN32
   {
-    HANDLE h = gst_file_src_win32_get_osfhandle (src->fd);
+    HANDLE h = gst_file_src_win32_get_osfhandle (src->fp);
     LARGE_INTEGER file_size;
 
     if (h == INVALID_HANDLE_VALUE)
-      goto could_not_stat;
+      return FALSE;
 
-    if (!GetFileSizeEx (h, &file_size)) {
-      goto could_not_stat;
-    }
+    if (!GetFileSizeEx (h, &file_size))
+      return FALSE;
 
     *size = file_size.QuadPart;
   }
 #else
   {
     struct_stat stat_results;
+    int fd = fileno (src->fp);
 
-    if (fstat (src->fd, &stat_results) < 0)
-      goto could_not_stat;
+    if (fd == -1)
+      return FALSE;
+
+    if (fstat (fileno (src->fp), &stat_results) < 0)
+      return FALSE;
 
     *size = stat_results.st_size;
   }
 #endif
 
   return TRUE;
-
-  /* ERROR */
-could_not_stat:
-  {
-    return FALSE;
-  }
 }
 
 /* open the file, necessary to go to READY state */
@@ -486,10 +521,6 @@ static gboolean
 gst_file_src_start (GstBaseSrc * basesrc)
 {
   GstFileSrc *src = GST_FILE_SRC (basesrc);
-  int flags = O_RDONLY | O_BINARY;
-#if defined (__BIONIC__)
-  flags |= O_LARGEFILE;
-#endif
 
   if (src->filename == NULL || src->filename[0] == '\0')
     goto no_filename;
@@ -497,14 +528,14 @@ gst_file_src_start (GstBaseSrc * basesrc)
   GST_INFO_OBJECT (src, "opening file %s", src->filename);
 
   /* open the file */
-  src->fd = g_open (src->filename, flags, 0);
+  src->fp = fopen (src->filename, "rb");
 
-  if (src->fd < 0)
+  if (!src->fp)
     goto open_failed;
 
 #ifdef G_OS_WIN32
   {
-    HANDLE h = gst_file_src_win32_get_osfhandle (src->fd);
+    HANDLE h = gst_file_src_win32_get_osfhandle (src->fp);
     FILE_STANDARD_INFO file_info;
 
     if (h == INVALID_HANDLE_VALUE)
@@ -525,7 +556,7 @@ gst_file_src_start (GstBaseSrc * basesrc)
     struct_stat stat_results;
 
     /* check if it is a regular file, otherwise bail out */
-    if (fstat (src->fd, &stat_results) < 0)
+    if (fstat (fileno (src->fp), &stat_results) < 0)
       goto no_stat;
 
     if (S_ISDIR (stat_results.st_mode))
@@ -544,14 +575,14 @@ gst_file_src_start (GstBaseSrc * basesrc)
 
   /* We need to check if the underlying file is seekable. */
   {
-    off_t res = lseek (src->fd, 0, SEEK_END);
+    off_t res = fseeko (src->fp, 0, SEEK_END);
 
     if (res == (off_t) - 1) {
       GST_LOG_OBJECT (src, "disabling seeking, lseek failed: %s",
           g_strerror (errno));
       src->seekable = FALSE;
     } else {
-      res = lseek (src->fd, 0, SEEK_SET);
+      res = fseeko (src->fp, 0, SEEK_SET);
 
       if (res == (off_t) - 1) {
         /* We really don't like not being able to go back to 0 */
@@ -568,6 +599,14 @@ gst_file_src_start (GstBaseSrc * basesrc)
   src->seekable = src->seekable && src->is_regular;
 
   gst_base_src_set_dynamic_size (basesrc, src->seekable);
+
+  if (src->buffer_size) {
+    src->buffer = g_malloc (src->buffer_size);
+    if (setvbuf (src->fp, (char *) src->buffer, _IOFBF, src->buffer_size) != 0) {
+      GST_WARNING_OBJECT (src, "setvbuf() failed");
+      g_clear_pointer (&src->buffer, g_free);
+    }
+  }
 
   return TRUE;
 
@@ -621,7 +660,7 @@ lseek_wonky:
     goto error_close;
   }
 error_close:
-  close (src->fd);
+  g_clear_pointer (&src->fp, fclose);
 error_exit:
   return FALSE;
 }
@@ -632,11 +671,9 @@ gst_file_src_stop (GstBaseSrc * basesrc)
 {
   GstFileSrc *src = GST_FILE_SRC (basesrc);
 
-  /* close the file */
-  g_close (src->fd, NULL);
+  g_clear_pointer (&src->fp, fclose);
+  g_clear_pointer (&src->buffer, g_free);
 
-  /* zero out a lot of our state */
-  src->fd = 0;
   src->is_regular = FALSE;
 
   return TRUE;

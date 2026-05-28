@@ -1713,6 +1713,7 @@ gst_aggregator_flush (GstAggregator * self)
   GST_OBJECT_LOCK (self);
   priv->send_segment = TRUE;
   priv->flushing = FALSE;
+  priv->first_buffer = TRUE;
   GST_OBJECT_UNLOCK (self);
   if (klass->flush)
     ret = klass->flush (self);
@@ -4331,4 +4332,21 @@ void
 gst_aggregator_set_force_live (GstAggregator * self, gboolean force_live)
 {
   self->priv->force_live = force_live;
+}
+
+/**
+ * gst_aggregator_ensure_mandatory_events:
+ * @self: The #GstAggregator
+ *
+ * This method will push mandatory events such as stream-start, caps,
+ * and segment if needed.
+ *
+ * Since: 1.24
+ */
+void
+gst_aggregator_ensure_mandatory_events (GstAggregator * self)
+{
+  g_return_if_fail (GST_IS_AGGREGATOR (self));
+
+  gst_aggregator_push_mandatory_events (self, FALSE);
 }

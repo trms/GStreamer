@@ -2136,9 +2136,10 @@ gst_ffmpegviddec_video_frame (GstFFMpegVidDec * ffmpegdec,
       GstVideoInfo *info = &ffmpegdec->output_state->info;
       if (vmeta->width != GST_VIDEO_INFO_WIDTH (info) ||
           vmeta->height != GST_VIDEO_INFO_HEIGHT (info)) {
-        g_error ("video meta uses %dx%d instead of %dx%d",
+        GST_ERROR_OBJECT (ffmpegdec, "video meta uses %dx%d instead of %dx%d",
             vmeta->width, vmeta->height, GST_VIDEO_INFO_WIDTH (info),
             GST_VIDEO_INFO_HEIGHT (info));
+        GST_VIDEO_CODEC_FRAME_SET_DECODE_ONLY (output_frame);
       }
     }
   }
