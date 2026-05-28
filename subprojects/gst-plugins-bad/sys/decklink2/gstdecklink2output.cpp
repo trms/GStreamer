@@ -307,7 +307,7 @@ public:
       return NULL;
     }
 
-    cloned = new IGstDeckLinkVideoFrame (&frame_);
+    cloned = new IGstDeckLinkVideoFrame (&frame);
     if (ancillary_)
       cloned->SetAncillaryData (ancillary_);
     if (timecode_) {
