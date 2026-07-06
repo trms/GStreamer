@@ -1,4 +1,4 @@
 [wrap-git]
 directory=gst-plugins-rs
 url=https://github.com/trms/gst-plugins-rs.git
-revision=cbl-2026-01-15
+revision=cbl-2026-07-06
