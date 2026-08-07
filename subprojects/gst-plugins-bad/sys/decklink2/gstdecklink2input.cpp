@@ -1544,7 +1544,7 @@ gst_decklink2_input_do_restart (GstDeckLink2Input * self)
   priv->was_restarted = true;
   priv->need_restart = false;
   priv->lock.unlock ();
-  gst_decklink2_input_stop_streams (self);
+  gst_decklink2_input_pause_streams (self);
   gst_decklink2_input_flush_streams (self);
   gst_decklink2_input_start_streams (self);
   priv->lock.lock ();
