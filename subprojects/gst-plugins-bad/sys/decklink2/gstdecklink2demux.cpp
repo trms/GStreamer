@@ -25,6 +25,7 @@
 #include "gstdecklink2demux.h"
 #include "gstdecklink2utils.h"
 #include "gstdecklink2object.h"
+#include <string>
 
 GST_DEBUG_CATEGORY_STATIC (gst_decklink2_demux_debug);
 #define GST_CAT_DEFAULT gst_decklink2_demux_debug
@@ -47,8 +48,6 @@ struct _GstDeckLink2Demux
 
   GstFlowCombiner *flow_combiner;
   GstCaps *audio_caps;
-
-  guint drop_count;
 };
 
 static void gst_decklink2_demux_finalize (GObject * object);
@@ -103,13 +102,11 @@ gst_decklink2_demux_init (GstDeckLink2Demux * self)
   gst_pad_set_chain_function (self->sink_pad, gst_decklink2_demux_chain);
   gst_pad_set_event_function (self->sink_pad, gst_decklink2_demux_sink_event);
   gst_element_add_pad (GST_ELEMENT (self), self->sink_pad);
-  gst_object_unref (templ);
 
   templ = gst_element_class_get_pad_template (klass, "video");
   self->video_pad = gst_pad_new_from_template (templ, "video");
   gst_element_add_pad (GST_ELEMENT (self), self->video_pad);
   gst_pad_use_fixed_caps (self->video_pad);
-  gst_object_unref (templ);
 
   self->flow_combiner = gst_flow_combiner_new ();
   gst_flow_combiner_add_pad (self->flow_combiner, self->video_pad);
@@ -135,7 +132,6 @@ gst_decklink2_demux_change_state (GstElement * element,
   switch (transition) {
     case GST_STATE_CHANGE_READY_TO_PAUSED:
       gst_clear_caps (&self->audio_caps);
-      self->drop_count = 0;
       break;
     default:
       break;
@@ -159,55 +155,37 @@ gst_decklink2_demux_change_state (GstElement * element,
   return ret;
 }
 
-static GstFlowReturn
-gst_decklink2_demux_chain (GstPad * sinkpad, GstObject * parent,
-    GstBuffer * inbuf)
+static gboolean
+gst_decklink2_demux_foreach_meta (GstBuffer * buffer, GstMeta ** meta,
+    gpointer user_data)
 {
-  GstDeckLink2Demux *self = GST_DECKLINK2_DEMUX (parent);
-  GstDeckLink2AudioMeta *meta;
-  GstSample *audio_sample = NULL;
-  GstFlowReturn ret;
-  gsize buf_size;
+  auto self = GST_DECKLINK2_DEMUX (user_data);
 
-  meta = gst_buffer_get_decklink2_audio_meta (inbuf);
-  if (meta) {
-    audio_sample = gst_sample_ref (meta->sample);
-    inbuf = gst_buffer_make_writable (inbuf);
-    gst_buffer_remove_meta (inbuf, GST_META_CAST (meta));
-  }
-
-  if (audio_sample) {
-    GstCaps *audio_caps = gst_sample_get_caps (audio_sample);
-    GstBuffer *audio_buf = gst_sample_get_buffer (audio_sample);
-
-    if (!audio_caps) {
-      GST_WARNING_OBJECT (self, "Audio sample without caps");
-      gst_sample_unref (audio_sample);
-      audio_sample = NULL;
-      goto out;
-    }
-
-    if (!audio_buf) {
-      GST_WARNING_OBJECT (self, "Audio sample without buffer");
-      gst_sample_unref (audio_sample);
-      audio_sample = NULL;
-      goto out;
-    }
+  if ((*meta)->info->api == gst_decklink2_audio_meta_api_get_type ()) {
+    auto audio_meta = (GstDeckLink2AudioMeta *) (*meta);
+    auto buf = gst_sample_get_buffer (audio_meta->sample);
+    auto caps = gst_sample_get_caps (audio_meta->sample);
 
     if (!self->audio_pad) {
-      GstEvent *event;
-
       self->audio_pad = gst_pad_new_from_static_template (&audio_template,
           "audio");
       gst_pad_set_active (self->audio_pad, TRUE);
 
-      event = gst_pad_get_sticky_event (self->sink_pad,
+      auto event = gst_pad_get_sticky_event (self->sink_pad,
           GST_EVENT_STREAM_START, 0);
+
+      const gchar *sid;
+      gst_event_parse_stream_start (event, &sid);
+
+      auto new_sid = std::string (sid) + std::string ("-audio");
+      gst_event_unref (event);
+
+      event = gst_event_new_stream_start (new_sid.c_str());
 
       gst_pad_store_sticky_event (self->audio_pad, event);
       gst_event_unref (event);
 
-      gst_caps_replace (&self->audio_caps, audio_caps);
+      gst_caps_replace (&self->audio_caps, caps);
 
       event = gst_event_new_caps (self->audio_caps);
       gst_pad_store_sticky_event (self->audio_pad, event);
@@ -223,52 +201,41 @@ gst_decklink2_demux_chain (GstPad * sinkpad, GstObject * parent,
       gst_flow_combiner_add_pad (self->flow_combiner, self->audio_pad);
 
       gst_element_no_more_pads (GST_ELEMENT (self));
-    } else if (!self->audio_caps || !gst_caps_is_equal (self->audio_caps,
-            audio_caps)) {
-      GstEvent *event;
+    } else if (!gst_caps_is_equal (self->audio_caps, caps)) {
+      gst_caps_replace (&self->audio_caps, caps);
 
-      gst_caps_replace (&self->audio_caps, audio_caps);
-
-      event = gst_event_new_caps (self->audio_caps);
+      auto event = gst_event_new_caps (self->audio_caps);
       gst_pad_push_event (self->audio_pad, event);
     }
+
+    GST_LOG_OBJECT (self, "Pushing audio buffer %" GST_PTR_FORMAT, buf);
+
+    auto ret = gst_pad_push (self->audio_pad, gst_buffer_ref (buf));
+    gst_flow_combiner_update_pad_flow (self->flow_combiner,
+        self->audio_pad, ret);
+
+    *meta = nullptr;
   }
 
-out:
-  buf_size = gst_buffer_get_size (inbuf);
-  if (buf_size < self->video_info.size) {
-    GST_WARNING_OBJECT (self, "Too small buffer size %" G_GSIZE_FORMAT
-        " < %" G_GSIZE_FORMAT, buf_size, self->video_info.size);
-    gst_buffer_unref (inbuf);
-    self->drop_count++;
+  return TRUE;
+}
 
-    if (self->drop_count > 30) {
-      GST_ERROR_OBJECT (self, "Too many buffers were dropped");
-      return GST_FLOW_ERROR;
-    }
+static GstFlowReturn
+gst_decklink2_demux_chain (GstPad * sinkpad, GstObject * parent,
+    GstBuffer * inbuf)
+{
+  GstDeckLink2Demux *self = GST_DECKLINK2_DEMUX (parent);
+  GstFlowReturn ret;
 
-    return GST_FLOW_OK;
-  }
+  inbuf = gst_buffer_make_writable (inbuf);
 
-  self->drop_count = 0;
+  gst_buffer_foreach_meta (inbuf, gst_decklink2_demux_foreach_meta, self);
 
   GST_LOG_OBJECT (self, "Pushing video buffer %" GST_PTR_FORMAT, inbuf);
   ret = gst_pad_push (self->video_pad, inbuf);
-  ret = gst_flow_combiner_update_pad_flow (self->flow_combiner,
+
+  return gst_flow_combiner_update_pad_flow (self->flow_combiner,
       self->video_pad, ret);
-
-  if (audio_sample) {
-    GstBuffer *audio_buf = gst_sample_get_buffer (audio_sample);
-    gst_buffer_ref (audio_buf);
-    gst_sample_unref (audio_sample);
-
-    GST_LOG_OBJECT (self, "Pushing audio buffer %" GST_PTR_FORMAT, audio_buf);
-    ret = gst_pad_push (self->audio_pad, audio_buf);
-    ret = gst_flow_combiner_update_pad_flow (self->flow_combiner,
-        self->audio_pad, ret);
-  }
-
-  return ret;
 }
 
 static gboolean

@@ -273,20 +273,6 @@ gst_decklink2_sink_class_init (GstDeckLink2SinkClass * klass)
       NULL, NULL, NULL, G_TYPE_NONE, 0);
 
   GstCaps *templ_caps = gst_decklink2_get_default_template_caps ();
-  templ_caps = gst_caps_make_writable (templ_caps);
-
-  GValue ch_list = G_VALUE_INIT;
-  gint ch[] = { 0, 2, 8, 16 };
-  g_value_init (&ch_list, GST_TYPE_LIST);
-  for (guint i = 0; i < G_N_ELEMENTS (ch); i++) {
-    GValue ch_val = G_VALUE_INIT;
-    g_value_init (&ch_val, G_TYPE_INT);
-    g_value_set_int (&ch_val, ch[i]);
-    gst_value_list_append_and_take_value (&ch_list, &ch_val);
-  }
-
-  gst_caps_set_value (templ_caps, "audio-channels", &ch_list);
-  g_value_unset (&ch_list);
 
   gst_element_class_add_pad_template (element_class,
       gst_pad_template_new ("sink", GST_PAD_SINK, GST_PAD_ALWAYS, templ_caps));
@@ -513,27 +499,63 @@ gst_decklink2_sink_get_property (GObject * object, guint prop_id,
   }
 }
 
+static GstCaps *
+gst_decklink2_sink_get_audio_caps (GstDeckLink2Sink * self)
+{
+  static GstStaticCaps audio_caps_static = GST_STATIC_CAPS ("audio/x-raw, "
+      "format = (string) { S16LE, S32LE }, layout = (string) interleaved, "
+      "rate = (int) 48000, channels = (int) { 2, 8, 16}");
+
+  auto caps = gst_static_caps_get (&audio_caps_static);
+  caps = gst_caps_make_writable (caps);
+
+  if (self->output) {
+    guint max_ch;
+    GValue ch_list = G_VALUE_INIT;
+    GValue ch_val = G_VALUE_INIT;
+
+    max_ch = gst_decklink2_output_get_max_audio_channels (self->output);
+
+    g_value_init (&ch_list, GST_TYPE_LIST);
+    g_value_init (&ch_val, G_TYPE_INT);
+    g_value_set_int (&ch_val, 2);
+    gst_value_list_append_and_take_value (&ch_list, &ch_val);
+
+    if (max_ch >= 8) {
+      g_value_init (&ch_val, G_TYPE_INT);
+      g_value_set_int (&ch_val, 8);
+      gst_value_list_append_and_take_value (&ch_list, &ch_val);
+    }
+
+    if (max_ch >= 16) {
+      g_value_init (&ch_val, G_TYPE_INT);
+      g_value_set_int (&ch_val, 16);
+      gst_value_list_append_and_take_value (&ch_list, &ch_val);
+    }
+
+    gst_caps_set_value (caps, "channels", &ch_list);
+    g_value_unset (&ch_list);
+  }
+
+  GST_LOG_OBJECT (self, "Returning audio caps %" GST_PTR_FORMAT, caps);
+
+  return caps;
+}
+
 static gboolean
 gst_decklink2_sink_query (GstBaseSink * sink, GstQuery * query)
 {
   GstDeckLink2Sink *self = GST_DECKLINK2_SINK (sink);
 
   switch (GST_QUERY_TYPE (query)) {
-    case GST_QUERY_ACCEPT_CAPS:
-    {
-      GstCaps *caps, *allowed;
-      gboolean can_intercept;
-
-      gst_query_parse_accept_caps (query, &caps);
-      allowed = gst_decklink2_sink_get_caps (sink, NULL);
-      can_intercept = gst_caps_can_intersect (caps, allowed);
-      GST_DEBUG_OBJECT (self, "Checking if requested caps %" GST_PTR_FORMAT
-          " are intersectable of pad caps %" GST_PTR_FORMAT " result %d", caps,
-          allowed, can_intercept);
-      gst_caps_unref (allowed);
-      gst_query_set_accept_caps_result (query, can_intercept);
-      return TRUE;
-    }
+    case GST_QUERY_CUSTOM:
+      if (gst_query_is_decklink2_audio_caps (query)) {
+        auto caps = gst_decklink2_sink_get_audio_caps (self);
+        gst_query_set_decklink2_audio_caps (query, caps);
+        gst_caps_unref (caps);
+        return TRUE;
+      }
+      break;
     default:
       break;
   }
@@ -561,39 +583,6 @@ gst_decklink2_sink_get_caps (GstBaseSink * sink, GstCaps * filter)
   if (!caps) {
     GST_WARNING_OBJECT (self, "Couldn't get caps");
     caps = gst_caps_new_empty ();
-  } else if (self->output) {
-    guint max_ch;
-    GValue ch_list = G_VALUE_INIT;
-    GValue ch_val = G_VALUE_INIT;
-
-    max_ch = gst_decklink2_output_get_max_audio_channels (self->output);
-
-    caps = gst_caps_make_writable (caps);
-
-    g_value_init (&ch_list, GST_TYPE_LIST);
-
-    g_value_init (&ch_val, G_TYPE_INT);
-    g_value_set_int (&ch_val, 0);
-    gst_value_list_append_and_take_value (&ch_list, &ch_val);
-
-    g_value_init (&ch_val, G_TYPE_INT);
-    g_value_set_int (&ch_val, 2);
-    gst_value_list_append_and_take_value (&ch_list, &ch_val);
-
-    if (max_ch >= 8) {
-      g_value_init (&ch_val, G_TYPE_INT);
-      g_value_set_int (&ch_val, 8);
-      gst_value_list_append_and_take_value (&ch_list, &ch_val);
-    }
-
-    if (max_ch >= 16) {
-      g_value_init (&ch_val, G_TYPE_INT);
-      g_value_set_int (&ch_val, 16);
-      gst_value_list_append_and_take_value (&ch_list, &ch_val);
-    }
-
-    gst_caps_set_value (caps, "audio-channels", &ch_list);
-    g_value_unset (&ch_list);
   }
 
   if (filter) {
@@ -619,7 +608,6 @@ gst_decklink2_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
   GstAllocationParams params = { (GstMemoryFlags) 0, 15, 0, 0 };
   GstStructure *s;
   GstAudioFormat audio_format = GST_AUDIO_FORMAT_UNKNOWN;
-  const gchar *audio_format_str;
   gint audio_channels = 0;
   BMDAudioSampleType audio_sample_type = bmdAudioSampleType16bitInteger;
 
@@ -642,11 +630,16 @@ gst_decklink2_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
 
   self->video_info = info;
 
+  GstCaps *audio_caps = nullptr;
   s = gst_caps_get_structure (caps, 0);
-  audio_format_str = gst_structure_get_string (s, "audio-format");
-  if (audio_format_str)
-    audio_format = gst_audio_format_from_string (audio_format_str);
-  gst_structure_get_int (s, "audio-channels", &audio_channels);
+
+  if (gst_structure_get (s, "audio-caps", GST_TYPE_CAPS, &audio_caps, nullptr)) {
+    GstAudioInfo audio_info;
+    if (gst_audio_info_from_caps (&audio_info, audio_caps)) {
+      audio_format = GST_AUDIO_INFO_FORMAT (&audio_info);
+      audio_channels = GST_AUDIO_INFO_CHANNELS (&audio_info);
+    }
+  }
 
   if (audio_format == GST_AUDIO_FORMAT_S16LE) {
     audio_sample_type = bmdAudioSampleType16bitInteger;
@@ -693,7 +686,7 @@ gst_decklink2_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
   }
 
   GST_DEBUG_OBJECT (self, "Configuring output, mode %" GST_FOURCC_FORMAT
-      ", audio-sample-type %d, audio-channles %d",
+      ", audio-sample-type %d, audio-channels %d",
       GST_DECKLINK2_FOURCC_ARGS (self->selected_mode.mode),
       self->audio_sample_type, self->audio_channels);
 

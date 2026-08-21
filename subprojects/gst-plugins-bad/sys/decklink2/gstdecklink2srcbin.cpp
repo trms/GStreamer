@@ -25,6 +25,7 @@
 #include "gstdecklink2srcbin.h"
 #include "gstdecklink2src.h"
 #include "gstdecklink2utils.h"
+#include "gstdecklink2srcprops.h"
 
 GST_DEBUG_CATEGORY_STATIC (gst_decklink2_src_bin_debug);
 #define GST_CAT_DEFAULT gst_decklink2_src_bin_debug
@@ -35,6 +36,13 @@ static GstStaticPadTemplate audio_template = GST_STATIC_PAD_TEMPLATE ("audio",
     GST_STATIC_CAPS ("audio/x-raw, format = (string) { S16LE, S32LE }, "
         "rate = (int) 48000, channels = (int) { 2, 8, 16 }, "
         "layout = (string) interleaved"));
+
+enum
+{
+  PROP_USE_AUDIORATE = PROP_SRC_LAST,
+};
+
+#define DEFAULT_USE_AUDIORATE TRUE
 
 enum
 {
@@ -52,6 +60,10 @@ struct _GstDeckLink2SrcBin
 
   GstElement *src;
   GstElement *demux;
+  GstElement *audiorate;
+  GstPad *audio_pad;
+
+  gboolean use_audiorate;
 };
 
 static void gst_decklink2_src_bin_set_property (GObject * object,
@@ -84,6 +96,20 @@ gst_decklink2_src_bin_class_init (GstDeckLink2SrcBinClass * klass)
 
   gst_decklink2_src_install_properties (object_class);
 
+  g_object_class_install_property (object_class, PROP_USE_AUDIORATE,
+    g_param_spec_boolean ("use-audiorate", "Use Audio Rate",
+        "Use audio rate for timestamping",
+        DEFAULT_USE_AUDIORATE, (GParamFlags) (G_PARAM_READWRITE |
+        GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
+
+  /**
+   * GstDeckLink2SrcBin::restart:
+   * @decklink2srcbin: the decklink2src element to emit this signal on
+   *
+   * Signal action used to do soft restart the DeckLink device.
+   * Can be useful when the device misbehaves and user wants to do soft
+   * restart without stopping the pipeline
+   */
   gst_decklink2_src_bin_signals[SIGNAL_RESTART] =
       g_signal_new_class_handler ("restart", G_TYPE_FROM_CLASS (klass),
       (GSignalFlags) (G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION),
@@ -113,13 +139,17 @@ gst_decklink2_src_bin_init (GstDeckLink2SrcBin * self)
 
   self->src = gst_element_factory_make ("decklink2src", NULL);
   self->demux = gst_element_factory_make ("decklink2demux", NULL);
+  self->audiorate = gst_element_factory_make ("audiorate", NULL);
+
+  g_object_set (self->audiorate, "skip-to-first", TRUE, NULL);
 
   queue = gst_element_factory_make ("queue", NULL);
 
   g_object_set (queue, "max-size-buffers", 3, "max-size-bytes", 0,
       "max-size-time", (guint64) 0, NULL);
 
-  gst_bin_add_many (GST_BIN (self), self->src, queue, self->demux, NULL);
+  gst_bin_add_many (GST_BIN (self),
+      self->src, queue, self->demux, self->audiorate, NULL);
   gst_element_link_many (self->src, queue, self->demux, NULL);
 
   pad = gst_element_get_static_pad (self->demux, "video");
@@ -138,6 +168,8 @@ gst_decklink2_src_bin_init (GstDeckLink2SrcBin * self)
   gst_bin_set_suppressed_flags (GST_BIN (self),
       (GstElementFlags) (GST_ELEMENT_FLAG_SOURCE | GST_ELEMENT_FLAG_SINK));
   GST_OBJECT_FLAG_SET (self, GST_ELEMENT_FLAG_SOURCE);
+
+  self->use_audiorate = DEFAULT_USE_AUDIORATE;
 }
 
 static void
@@ -146,7 +178,14 @@ gst_decklink2_src_bin_set_property (GObject * object, guint prop_id,
 {
   GstDeckLink2SrcBin *self = GST_DECKLINK2_SRC_BIN (object);
 
-  g_object_set_property (G_OBJECT (self->src), pspec->name, value);
+  switch (prop_id) {
+    case PROP_USE_AUDIORATE:
+      self->use_audiorate = g_value_get_boolean (value);
+      break;
+    default:
+      g_object_set_property (G_OBJECT (self->src), pspec->name, value);
+      break;
+  }
 }
 
 static void
@@ -155,7 +194,14 @@ gst_decklink2_src_bin_get_property (GObject * object, guint prop_id,
 {
   GstDeckLink2SrcBin *self = GST_DECKLINK2_SRC_BIN (object);
 
-  g_object_get_property (G_OBJECT (self->src), pspec->name, value);
+  switch (prop_id) {
+    case PROP_USE_AUDIORATE:
+      g_value_set_boolean (value, self->use_audiorate);
+      break;
+    default:
+      g_object_get_property (G_OBJECT (self->src), pspec->name, value);
+      break;
+  }
 }
 
 static gboolean
@@ -191,33 +237,38 @@ on_pad_added (GstElement * demux, GstPad * pad, GstDeckLink2SrcBin * self)
 
   g_free (pad_name);
 
-  gpad = gst_ghost_pad_new ("audio", pad);
-  g_object_set_data (G_OBJECT (pad), "decklink2srcbin.ghostpad", gpad);
+  if (self->use_audiorate) {
+    GST_DEBUG_OBJECT (self,
+        "Using audiorate for audio pad %" GST_PTR_FORMAT, pad);
+    auto sinkpad = gst_element_get_static_pad (self->audiorate, "sink");
+    gst_pad_link (pad, sinkpad);
+    gst_object_unref (sinkpad);
+
+    auto srcpad = gst_element_get_static_pad (self->audiorate, "src");
+    gpad = gst_ghost_pad_new ("audio", srcpad);
+    gst_object_unref (srcpad);
+  } else {
+    gpad = gst_ghost_pad_new ("audio", pad);
+  }
 
   gst_pad_set_active (gpad, TRUE);
   gst_pad_sticky_events_foreach (pad,
       (GstPadStickyEventsForeachFunction) copy_sticky_events, gpad);
+
   gst_element_add_pad (GST_ELEMENT (self), gpad);
 }
 
 static void
 on_pad_removed (GstElement * demux, GstPad * pad, GstDeckLink2SrcBin * self)
 {
-  GstPad *gpad;
-
   GST_DEBUG_OBJECT (self, "Pad removed %" GST_PTR_FORMAT, pad);
 
-  if (!GST_PAD_IS_SRC (pad))
+  if (!self->audio_pad)
     return;
 
-  gpad = (GstPad *) g_object_get_data (G_OBJECT (pad),
-      "decklink2srcbin.ghostpad");
-  if (!gpad) {
-    GST_DEBUG_OBJECT (self, "No ghost pad found");
-    return;
-  }
-
-  gst_element_remove_pad (GST_ELEMENT (self), gpad);
+  gst_ghost_pad_set_target ((GstGhostPad *) self->audio_pad, nullptr);
+  gst_element_remove_pad (GST_ELEMENT (self), self->audio_pad);
+  self->audio_pad = nullptr;
 }
 
 static void

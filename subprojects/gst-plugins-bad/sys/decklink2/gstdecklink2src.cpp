@@ -25,32 +25,13 @@
 #include "gstdecklink2src.h"
 #include "gstdecklink2utils.h"
 #include "gstdecklink2object.h"
+#include "gstdecklink2srcprops.h"
 
 #include <mutex>
 #include <string.h>
 
 GST_DEBUG_CATEGORY_STATIC (gst_decklink2_src_debug);
 #define GST_CAT_DEFAULT gst_decklink2_src_debug
-
-enum
-{
-  PROP_0,
-  PROP_MODE,
-  PROP_DEVICE_NUMBER,
-  PROP_PERSISTENT_ID,
-  PROP_VIDEO_CONNECTION,
-  PROP_AUDIO_CONNECTION,
-  PROP_VIDEO_FORMAT,
-  PROP_AUDIO_CHANNELS,
-  PROP_PROFILE_ID,
-  PROP_TIMECODE_FORMAT,
-  PROP_OUTPUT_CC,
-  PROP_OUTPUT_AFD_BAR,
-  PROP_BUFFER_SIZE,
-  PROP_SIGNAL,
-  PROP_SKIP_FIRST_TIME,
-  PROP_DESYNC_THRESHOLD,
-};
 
 #define DEFAULT_MODE                bmdModeUnknown
 #define DEFAULT_DEVICE_NUMBER       0
@@ -62,10 +43,10 @@ enum
 #define DEFAULT_TIMECODE_FORMAT     bmdTimecodeRP188Any
 #define DEFAULT_OUTPUT_CC           FALSE
 #define DEFAULT_OUTPUT_AFD_BAR      FALSE
-#define DEFAULT_BUFFER_SIZE         5
+#define DEFAULT_MAX_BUFFERED_FRAMES 5
 #define DEFAULT_AUDIO_CHANNELS      GST_DECKLINK2_AUDIO_CHANNELS_2
 #define DEFAULT_SKIP_FIRST_TIME     0
-#define DEFAULT_DESYNC_THRESHOLD    (250 * GST_MSECOND)
+#define DEFAULT_DESYNC_THRESHOLD    0
 
 enum
 {
@@ -95,7 +76,7 @@ struct _GstDeckLink2Src
   GstCaps *selected_caps;
   gboolean is_gap_buf;
 
-  gboolean running;
+  gboolean input_started;
 
   /* properties */
   BMDDisplayMode display_mode;
@@ -109,7 +90,7 @@ struct _GstDeckLink2Src
   BMDTimecodeFormat timecode_format;
   gboolean output_cc;
   gboolean output_afd_bar;
-  guint buffer_size;
+  guint max_buffered_frames;
   GstClockTime skip_first_time;
   GstClockTime desync_threshold;
 };
@@ -150,6 +131,14 @@ gst_decklink2_src_class_init (GstDeckLink2SrcClass * klass)
 
   gst_decklink2_src_install_properties (object_class);
 
+  /**
+   * GstDeckLink2Src::restart:
+   * @decklink2src: the decklink2src element to emit this signal on
+   *
+   * Signal action used to do soft restart the DeckLink device.
+   * Can be useful when the device misbehaves and user wants to do soft
+   * restart without stopping the pipeline
+   */
   gst_decklink2_src_signals[SIGNAL_RESTART] =
       g_signal_new_class_handler ("restart", G_TYPE_FROM_CLASS (klass),
       (GSignalFlags) (G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION),
@@ -207,7 +196,7 @@ gst_decklink2_src_init (GstDeckLink2Src * self)
   self->timecode_format = DEFAULT_TIMECODE_FORMAT;
   self->output_cc = DEFAULT_OUTPUT_CC;
   self->output_afd_bar = DEFAULT_OUTPUT_AFD_BAR;
-  self->buffer_size = DEFAULT_BUFFER_SIZE;
+  self->max_buffered_frames = DEFAULT_MAX_BUFFERED_FRAMES;
   self->is_gap_buf = FALSE;
   self->desync_threshold = DEFAULT_DESYNC_THRESHOLD;
 
@@ -270,8 +259,8 @@ gst_decklink2_src_set_property (GObject * object, guint prop_id,
     case PROP_OUTPUT_AFD_BAR:
       self->output_afd_bar = g_value_get_boolean (value);
       break;
-    case PROP_BUFFER_SIZE:
-      self->buffer_size = g_value_get_uint (value);
+    case PROP_MAX_BUFFERED_FRAMES:
+      self->max_buffered_frames = g_value_get_uint (value);
       break;
     case PROP_SKIP_FIRST_TIME:
       self->skip_first_time = g_value_get_uint64 (value);
@@ -327,8 +316,8 @@ gst_decklink2_src_get_property (GObject * object, guint prop_id, GValue * value,
     case PROP_OUTPUT_AFD_BAR:
       g_value_set_boolean (value, self->output_afd_bar);
       break;
-    case PROP_BUFFER_SIZE:
-      g_value_set_uint (value, self->buffer_size);
+    case PROP_MAX_BUFFERED_FRAMES:
+      g_value_set_uint (value, self->max_buffered_frames);
       break;
     case PROP_SIGNAL:
     {
@@ -405,8 +394,21 @@ gst_decklink2_src_set_caps (GstBaseSrc * src, GstCaps * caps)
     return FALSE;
   }
 
-  if (self->running)
+  if (self->input_started) {
+    if (!self->selected_caps) {
+      GST_ERROR_OBJECT (self, "No selected caps while running");
+      return FALSE;
+    }
+
+    if (!gst_caps_can_intersect (self->selected_caps, caps)) {
+      GST_ERROR_OBJECT (self, "Selected caps %" GST_PTR_FORMAT
+          " is not compatible with new caps %" GST_PTR_FORMAT,
+          self->selected_caps, caps);
+      return FALSE;
+    }
+
     return TRUE;
+  }
 
   if (!gst_video_info_from_caps (&self->video_info, caps)) {
     GST_WARNING_OBJECT (self, "Invalid caps %" GST_PTR_FORMAT, caps);
@@ -456,7 +458,7 @@ gst_decklink2_src_query (GstBaseSrc * src, GstQuery * query)
       }
 
       min = gst_util_uint64_scale (GST_SECOND, fps_d, fps_n);
-      max = self->buffer_size * min;
+      max = self->max_buffered_frames * min;
       gst_query_set_latency (query, TRUE, min, max);
       return TRUE;
     }
@@ -474,7 +476,7 @@ gst_decklink2_src_start (GstBaseSrc * src)
   GstDeckLink2SrcPrivate *priv = self->priv;
   std::lock_guard < std::mutex > lk (priv->lock);
 
-  self->running = FALSE;
+  self->input_started = FALSE;
   memset (&self->selected_mode, 0, sizeof (GstDeckLink2DisplayMode));
 
   gst_clear_caps (&self->selected_caps);
@@ -505,7 +507,7 @@ gst_decklink2_src_stop (GstBaseSrc * src)
   gst_clear_caps (&self->selected_caps);
   memset (&self->selected_mode, 0, sizeof (GstDeckLink2DisplayMode));
 
-  self->running = FALSE;
+  self->input_started = FALSE;
 
   return TRUE;
 }
@@ -537,9 +539,19 @@ gst_decklink2_src_unlock_stop (GstBaseSrc * src)
 }
 
 static gboolean
-gst_decklink2_src_run_unlocked (GstDeckLink2Src * self, gboolean auto_restart)
+gst_decklink2_src_ensure_started (GstDeckLink2Src * self)
 {
-  HRESULT hr;
+  GstDeckLink2SrcPrivate *priv = self->priv;
+  std::lock_guard < std::mutex > lk (priv->lock);
+
+  if (self->input_started)
+    return TRUE;
+
+  if (!self->input) {
+    GST_ERROR_OBJECT (self, "Input object was not configured");
+    return FALSE;
+  }
+
   GstDeckLink2InputVideoConfig video_config;
   GstDeckLink2InputAudioConfig audio_config;
 
@@ -554,33 +566,17 @@ gst_decklink2_src_run_unlocked (GstDeckLink2Src * self, gboolean auto_restart)
   audio_config.sample_type = bmdAudioSampleType32bitInteger;
   audio_config.channels = self->audio_channels;
 
-  hr = gst_decklink2_input_start (self->input, GST_ELEMENT (self),
-      self->profile_id, self->buffer_size,
-      auto_restart ? 0 : self->skip_first_time, &video_config, &audio_config);
+  auto hr = gst_decklink2_input_start (self->input, GST_ELEMENT (self),
+      self->profile_id, self->max_buffered_frames,
+      self->skip_first_time, &video_config, &audio_config);
   if (!gst_decklink2_result (hr)) {
     GST_ERROR_OBJECT (self, "Couldn't start stream, hr: 0x%x", (guint) hr);
     return FALSE;
   }
 
-  self->running = TRUE;
+  self->input_started = TRUE;
+
   return TRUE;
-}
-
-static gboolean
-gst_decklink2_src_run (GstDeckLink2Src * self)
-{
-  GstDeckLink2SrcPrivate *priv = self->priv;
-  std::lock_guard < std::mutex > lk (priv->lock);
-
-  if (self->running)
-    return TRUE;
-
-  if (!self->input) {
-    GST_ERROR_OBJECT (self, "Input object was not configured");
-    return FALSE;
-  }
-
-  return gst_decklink2_src_run_unlocked (self, FALSE);
 }
 
 static GstFlowReturn
@@ -593,37 +589,21 @@ gst_decklink2_src_create (GstPushSrc * src, GstBuffer ** buffer)
   GstDeckLink2SrcPrivate *priv = self->priv;
   gboolean is_gap_buf = FALSE;
   GstClockTimeDiff av_sync;
-  guint retry_count = 0;
-  gsize buf_size;
 
-again:
-  if (retry_count > 30) {
-    GST_ERROR_OBJECT (self, "Too many buffers were dropped");
-    return GST_FLOW_ERROR;
-  }
-
-  if (!gst_decklink2_src_run (self)) {
+  if (!gst_decklink2_src_ensure_started (self)) {
     GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
         ("Failed to start stream"));
     return GST_FLOW_ERROR;
   }
 
   ret = gst_decklink2_input_get_data (self->input, &buf, &caps, &av_sync);
-  if (ret != GST_FLOW_OK) {
-    if (ret == GST_DECKLINK2_INPUT_FLOW_STOPPED) {
-      GST_DEBUG_OBJECT (self, "Input was stopped for restarting");
-      retry_count++;
-      goto again;
-    }
-
+  if (ret != GST_FLOW_OK)
     return ret;
-  }
 
   if (!caps) {
-    GST_WARNING_OBJECT (self, "Buffer without caps");
+    GST_ERROR_OBJECT (self, "Buffer without caps");
     gst_clear_buffer (&buf);
-    retry_count++;
-    goto again;
+    return GST_FLOW_ERROR;
   }
 
   priv->lock.lock ();
@@ -650,15 +630,6 @@ again:
   if (is_gap_buf != self->is_gap_buf) {
     self->is_gap_buf = is_gap_buf;
     g_object_notify (G_OBJECT (self), "signal");
-  }
-
-  buf_size = gst_buffer_get_size (buf);
-  if (buf_size < self->video_info.size) {
-    GST_WARNING_OBJECT (self, "Too small buffer size %" G_GSIZE_FORMAT
-        " < %" G_GSIZE_FORMAT, buf_size, self->video_info.size);
-    gst_clear_buffer (&buf);
-    retry_count++;
-    goto again;
   }
 
   std::unique_lock < std::mutex > lk (priv->lock);
@@ -762,10 +733,10 @@ gst_decklink2_src_install_properties (GObjectClass * object_class)
           "Extract and output AFD/Bar as GstMeta (if present)",
           DEFAULT_OUTPUT_AFD_BAR, param_flags));
 
-  g_object_class_install_property (object_class, PROP_BUFFER_SIZE,
-      g_param_spec_uint ("buffer-size", "Buffer Size",
-          "Size of internal buffer in number of video frames", 1,
-          16, DEFAULT_BUFFER_SIZE, param_flags));
+  g_object_class_install_property (object_class, PROP_MAX_BUFFERED_FRAMES,
+      g_param_spec_uint ("max-buffered-frames", "Maximum Buffered Frames",
+          "Maximum number of video frames to buffer", 1,
+          16, DEFAULT_MAX_BUFFERED_FRAMES, param_flags));
 
   g_object_class_install_property (object_class, PROP_SIGNAL,
       g_param_spec_boolean ("signal", "Signal",
@@ -795,7 +766,7 @@ gst_decklink2_src_restart (GstDeckLink2Src * self)
   GstDeckLink2SrcPrivate *priv = self->priv;
   std::lock_guard < std::mutex > lk (priv->lock);
 
-  if (self->input && self->running) {
+  if (self->input && self->input_started) {
     GST_INFO_OBJECT (self, "Scheduling restart");
     gst_decklink2_input_schedule_restart (self->input);
   }

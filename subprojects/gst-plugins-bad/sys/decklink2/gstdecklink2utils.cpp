@@ -1252,3 +1252,51 @@ gst_buffer_add_decklink2_audio_meta (GstBuffer * buffer,
 
   return meta;
 }
+
+GstQuery *
+gst_query_new_decklink2_audio_caps (void)
+{
+  auto s = gst_structure_new_static_str ("GstQueryDeckLink2AudioCaps",
+      "caps", GST_TYPE_CAPS, nullptr, nullptr);
+  return gst_query_new_custom (GST_QUERY_CUSTOM, s);
+}
+
+gboolean
+gst_query_is_decklink2_audio_caps (GstQuery * query)
+{
+  g_return_val_if_fail (query, FALSE);
+
+  return GST_QUERY_TYPE (query) == GST_QUERY_CUSTOM &&
+      gst_structure_has_name (gst_query_get_structure (query),
+      "GstQueryDeckLink2AudioCaps");
+}
+
+void
+gst_query_parse_decklink2_audio_caps (GstQuery * query, GstCaps ** caps)
+{
+  g_return_if_fail (query);
+  g_return_if_fail (caps);
+
+  if (!gst_query_is_decklink2_audio_caps (query)) {
+    GST_WARNING ("Query is not a decklink2 audio caps query");
+    return;
+  }
+
+  auto s = gst_query_get_structure (query);
+  *caps = (GstCaps *) g_value_get_boxed (gst_structure_get_value (s, "caps"));
+}
+
+void
+gst_query_set_decklink2_audio_caps (GstQuery * query, GstCaps * caps)
+{
+  g_return_if_fail (query);
+  g_return_if_fail (caps);
+
+  if (!gst_query_is_decklink2_audio_caps (query)) {
+    GST_WARNING ("Query is not a decklink2 audio caps query");
+    return;
+  }
+
+  auto s = gst_query_writable_structure (query);
+  gst_structure_set (s, "caps", GST_TYPE_CAPS, caps, nullptr);
+}

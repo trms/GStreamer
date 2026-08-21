@@ -57,6 +57,10 @@ struct _GstDeckLink2Combiner
 
   guint64 num_video_buffers;
   guint64 num_audio_buffers;
+
+  GstClockTime timeout_advance;
+
+  gboolean caps_updated;
 };
 
 static gboolean gst_decklink2_combiner_sink_event (GstAggregator * agg,
@@ -126,7 +130,6 @@ gst_decklink2_combiner_init (GstDeckLink2Combiner * self)
   self->video_pad = (GstAggregatorPad *)
       g_object_new (GST_TYPE_AGGREGATOR_PAD, "name", "video", "direction",
       GST_PAD_SINK, "template", templ, NULL);
-  gst_object_unref (templ);
   gst_element_add_pad (GST_ELEMENT_CAST (self), GST_PAD_CAST (self->video_pad));
 
   templ = gst_static_pad_template_get (&audio_template);
@@ -147,7 +150,6 @@ gst_decklink2_combiner_sink_event (GstAggregator * agg,
     case GST_EVENT_CAPS:
     {
       GstCaps *caps;
-
       gst_event_parse_caps (event, &caps);
 
       GST_DEBUG_OBJECT (self, "Got caps from %s pad %" GST_PTR_FORMAT,
@@ -156,29 +158,8 @@ gst_decklink2_combiner_sink_event (GstAggregator * agg,
       if (aggpad == self->video_pad) {
         gst_caps_replace (&self->video_caps, caps);
         gst_video_info_from_caps (&self->video_info, caps);
-      } else {
-        /* FIXME: flush audio if audio info is changed or disallow audio update */
-        gst_caps_replace (&self->audio_caps, caps);
-        gst_audio_info_from_caps (&self->audio_info, caps);
-      }
 
-      if (self->video_caps) {
         gint fps_n, fps_d;
-        GstClockTime latency;
-
-        caps = gst_caps_copy (self->video_caps);
-        if (GST_AUDIO_INFO_IS_VALID (&self->audio_info)) {
-          gst_caps_set_simple (caps, "audio-channels", G_TYPE_INT,
-              self->audio_info.channels,
-              "audio-format", G_TYPE_STRING,
-              gst_audio_format_to_string (self->audio_info.finfo->format),
-              NULL);
-        } else {
-          gst_caps_set_simple (caps, "audio-channels", G_TYPE_INT, 0, NULL);
-        }
-
-        GST_DEBUG_OBJECT (self, "Set caps %" GST_PTR_FORMAT, caps);
-
         if (self->video_info.fps_n > 0 && self->video_info.fps_d > 0) {
           fps_n = self->video_info.fps_n;
           fps_d = self->video_info.fps_d;
@@ -187,24 +168,41 @@ gst_decklink2_combiner_sink_event (GstAggregator * agg,
           fps_d = 1;
         }
 
-        latency = gst_util_uint64_scale_ceil (GST_SECOND, fps_d, fps_n);
-        gst_aggregator_set_latency (agg, latency, latency);
+        auto latency = gst_util_uint64_scale_ceil (GST_SECOND, fps_d, fps_n);
+        gst_aggregator_set_latency (agg, latency, GST_CLOCK_TIME_NONE);
+        self->timeout_advance = latency;
+        self->caps_updated = TRUE;
+      } else {
+        if (self->audio_caps) {
+          /* We don't allow audio format/channel changes */
+          GstAudioInfo audio_info;
+          gst_audio_info_from_caps (&audio_info, self->audio_caps);
 
-        gst_aggregator_set_src_caps (agg, caps);
-        gst_caps_unref (caps);
+          if (GST_AUDIO_INFO_FORMAT (&audio_info) !=
+                GST_AUDIO_INFO_FORMAT (&self->audio_info) ||
+              GST_AUDIO_INFO_CHANNELS (&audio_info) !=
+              GST_AUDIO_INFO_CHANNELS (&self->audio_info)) {
+            GST_ELEMENT_ERROR (self, CORE, NEGOTIATION, (nullptr),
+              ("Audio format or channel count changed, not supported"));
+            return FALSE;
+          }
+        }
+        gst_caps_replace (&self->audio_caps, caps);
+        gst_audio_info_from_caps (&self->audio_info, caps);
+        self->caps_updated = TRUE;
       }
-      break;
+      return TRUE;
     }
     case GST_EVENT_SEGMENT:
-    {
-      const GstSegment *segment;
+      if (aggpad == self->video_pad) {
+        const GstSegment *segment;
 
-      gst_event_parse_segment (event, &segment);
+        gst_event_parse_segment (event, &segment);
 
-      /* pass through video segment as-is */
-      gst_aggregator_update_segment (agg, segment);
+        /* pass through video segment as-is */
+        gst_aggregator_update_segment (agg, segment);
+      }
       break;
-    }
     default:
       break;
   }
@@ -221,125 +219,84 @@ gst_decklink2_combiner_sink_query (GstAggregator * agg,
 
   switch (GST_QUERY_TYPE (query)) {
     case GST_QUERY_CAPS:
-    {
-      GstQuery *caps_query;
-      GstCaps *filter = NULL;
-      GstStructure *s;
-      GstCaps *caps = NULL;
-      GstCaps *templ_caps = gst_pad_get_pad_template_caps (GST_PAD (aggpad));
-
-      gst_query_parse_caps (query, &filter);
-
-      GST_LOG_OBJECT (aggpad, "Handle query caps with filter %" GST_PTR_FORMAT,
-          filter);
-
-      if (filter)
-        caps_query = gst_query_new_caps (filter);
-      else
-        caps_query = gst_query_new_caps (templ_caps);
-
-      ret = gst_pad_peer_query (GST_AGGREGATOR_SRC_PAD (agg), caps_query);
-      gst_query_parse_caps_result (caps_query, &caps);
-
-      GST_LOG_OBJECT (aggpad, "Downstream query caps result %d, %"
-          GST_PTR_FORMAT, ret, caps);
-
-      if (!caps || gst_caps_is_empty (caps) || gst_caps_is_any (caps)) {
-        if (filter) {
-          GstCaps *temp = gst_caps_intersect_full (filter, templ_caps,
-              GST_CAPS_INTERSECT_FIRST);
-          gst_query_set_caps_result (query, temp);
-          gst_caps_unref (temp);
-        } else {
-          gst_query_set_caps_result (query, templ_caps);
-        }
-        gst_caps_unref (templ_caps);
-        gst_query_unref (caps_query);
-
-        return TRUE;
-      }
-
-      caps = gst_caps_copy (caps);
-      gst_query_unref (caps_query);
-
       if (aggpad == self->video_pad) {
-        /* Remove audio related fields */
-        for (guint i = 0; i < gst_caps_get_size (caps); i++) {
-          s = gst_caps_get_structure (caps, i);
-          gst_structure_remove_field (s, "audio-channels");
+        ret = gst_pad_peer_query (GST_AGGREGATOR_SRC_PAD (agg), query);
+
+        if (!ret) {
+          GST_DEBUG_OBJECT (aggpad,
+              "Downstream query failed, using default template caps");
+
+          auto templ_caps = gst_decklink2_get_default_template_caps ();
+          gst_query_set_caps_result (query, templ_caps);
+          gst_caps_unref (templ_caps);
         }
-        gst_query_set_caps_result (query, caps);
-        gst_caps_unref (caps);
       } else {
-        GstCaps *audio_caps = gst_caps_copy (templ_caps);
-        const GValue *ch;
+        auto audio_query = gst_query_new_decklink2_audio_caps ();
+        GstCaps *audio_caps = nullptr;
 
-        /* construct caps with updated channels field */
-        s = gst_caps_get_structure (caps, 0);
-        ch = gst_structure_get_value (s, "audio-channels");
-        if (ch)
-          gst_caps_set_value (audio_caps, "channels", ch);
-
-        gst_caps_unref (caps);
-
-        if (filter) {
-          GstCaps *temp = gst_caps_intersect_full (filter, audio_caps,
-              GST_CAPS_INTERSECT_FIRST);
-          gst_query_set_caps_result (query, temp);
-          gst_caps_unref (temp);
-        } else {
-          gst_query_set_caps_result (query, audio_caps);
+        ret = gst_pad_peer_query (GST_AGGREGATOR_SRC_PAD (agg), audio_query);
+        if (ret) {
+          gst_query_parse_decklink2_audio_caps (audio_query, &audio_caps);
+          if (audio_caps) {
+            GST_DEBUG_OBJECT (aggpad, "Downstream audio caps %" GST_PTR_FORMAT,
+                audio_caps);
+            gst_caps_ref (audio_caps);
+          }
         }
+        gst_query_unref (audio_query);
+
+        if (!audio_caps) {
+          GST_DEBUG_OBJECT (aggpad, "Downstream query failed");
+          audio_caps = gst_static_pad_template_get_caps (&audio_template);
+        }
+
+        gst_query_set_caps_result (query, audio_caps);
         gst_caps_unref (audio_caps);
       }
-      gst_caps_unref (templ_caps);
       return TRUE;
-    }
     case GST_QUERY_ACCEPT_CAPS:
-      GST_DEBUG_OBJECT (aggpad, "Handle accept caps");
-
       if (aggpad == self->video_pad) {
         ret = gst_pad_peer_query (GST_AGGREGATOR_SRC_PAD (agg), query);
         GST_DEBUG_OBJECT (aggpad, "Video accept caps result %d", ret);
+
+        if (!ret) {
+          GST_DEBUG_OBJECT (aggpad,
+              "Downstream query failed, using default template caps");
+
+          auto templ_caps = gst_decklink2_get_default_template_caps ();
+          GstCaps *caps;
+          gst_query_parse_accept_caps (query, &caps);
+          gst_query_set_accept_caps_result (query, gst_caps_can_intersect (caps,
+                  templ_caps));
+          gst_caps_unref (templ_caps);
+        }
       } else {
-        GstQuery *caps_query;
-        GstCaps *audio_caps;
-        GstCaps *caps = NULL;
-        const GValue *ch;
-        GstStructure *s;
+        auto audio_query = gst_query_new_decklink2_audio_caps ();
+        GstCaps *audio_caps = nullptr;
 
-        caps_query = gst_query_new_caps (NULL);
-        ret = gst_pad_peer_query (GST_AGGREGATOR_SRC_PAD (agg), caps_query);
+        ret = gst_pad_peer_query (GST_AGGREGATOR_SRC_PAD (agg), audio_query);
+        if (ret) {
+          gst_query_parse_decklink2_audio_caps (audio_query, &audio_caps);
+          if (audio_caps) {
+            GST_DEBUG_OBJECT (aggpad, "Downstream audio caps %" GST_PTR_FORMAT,
+                audio_caps);
+            gst_caps_ref (audio_caps);
+          }
+        }
+        gst_query_unref (audio_query);
 
-        gst_query_parse_caps_result (caps_query, &caps);
-        GST_LOG_OBJECT (aggpad, "Downstream query caps result %d, %"
-            GST_PTR_FORMAT, ret, caps);
-
-        if (!caps || gst_caps_is_empty (caps) || gst_caps_is_any (caps)) {
-          gst_query_unref (caps_query);
-          gst_query_set_accept_caps_result (query, TRUE);
-
-          return TRUE;
+        if (!audio_caps) {
+          GST_DEBUG_OBJECT (aggpad, "Downstream query failed");
+          audio_caps = gst_static_pad_template_get_caps (&audio_template);
         }
 
-        audio_caps = gst_static_pad_template_get_caps (&audio_template);
-        /* construct caps with updated channels field */
-        audio_caps = gst_caps_copy (audio_caps);
-
-        s = gst_caps_get_structure (caps, 0);
-        ch = gst_structure_get_value (s, "audio-channels");
-        if (ch)
-          gst_caps_set_value (audio_caps, "channels", ch);
-
-        gst_query_unref (caps_query);
-
+        GstCaps *caps;
         gst_query_parse_accept_caps (query, &caps);
-        gst_query_set_accept_caps_result (query, gst_caps_is_subset (caps,
+        gst_query_set_accept_caps_result (query, gst_caps_can_intersect (caps,
                 audio_caps));
         gst_caps_unref (audio_caps);
-        ret = TRUE;
       }
-      return ret;
+      return TRUE;
     default:
       break;
   }
@@ -362,6 +319,10 @@ gst_decklink2_combiner_reset (GstDeckLink2Combiner * self)
   self->audio_running_time = GST_CLOCK_TIME_NONE;
   self->num_video_buffers = 0;
   self->num_audio_buffers = 0;
+  self->caps_updated = FALSE;
+
+  /* 30fps duration by default */
+  self->timeout_advance = 33 * GST_MSECOND;
 }
 
 static gboolean
@@ -459,6 +420,27 @@ gst_decklink2_combiner_aggregate (GstAggregator * agg, gboolean timeout)
       gst_aggregator_pad_is_eos (self->audio_pad)) {
     GST_DEBUG_OBJECT (self, "All EOS");
     return GST_FLOW_EOS;
+  }
+
+  if (!self->video_caps) {
+    GST_LOG_OBJECT (self, "Waiting for video caps");
+    goto need_data;
+  }
+
+  if (!self->audio_caps) {
+    GST_LOG_OBJECT (self, "Waiting for audio caps");
+    goto need_data;
+  }
+
+  if (self->caps_updated) {
+    auto caps = gst_caps_copy (self->video_caps);
+    gst_caps_set_simple (caps,
+        "audio-caps", GST_TYPE_CAPS, self->audio_caps, nullptr);
+
+    GST_DEBUG_OBJECT (self, "Set src caps %" GST_PTR_FORMAT, caps);
+    gst_aggregator_set_src_caps (agg, caps);
+    gst_caps_unref (caps);
+    self->caps_updated = FALSE;
   }
 
   video_buf = gst_aggregator_pad_peek_buffer (self->video_pad);
@@ -641,6 +623,9 @@ gst_decklink2_combiner_aggregate (GstAggregator * agg, gboolean timeout)
 need_data:
   gst_clear_buffer (&video_buf);
   gst_clear_buffer (&audio_buf);
+
+  if (timeout)
+    GST_AGGREGATOR_PAD (agg->srcpad)->segment.position += self->timeout_advance;
 
   return GST_AGGREGATOR_FLOW_NEED_DATA;
 }

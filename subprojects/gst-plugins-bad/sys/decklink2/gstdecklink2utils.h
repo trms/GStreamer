@@ -176,7 +176,6 @@ GstVideoFormat gst_decklink2_video_format_from_pixel_format (BMDPixelFormat form
 
 BMDPixelFormat gst_decklink2_pixel_format_from_video_format (GstVideoFormat format);
 
-
 struct _GstDeckLink2AudioMeta
 {
   GstMeta meta;
@@ -195,6 +194,16 @@ const GstMetaInfo *gst_decklink2_audio_meta_get_info (void);
 
 GstDeckLink2AudioMeta * gst_buffer_add_decklink2_audio_meta (GstBuffer * buffer,
                                                              GstSample * audio_sample);
+
+GstQuery * gst_query_new_decklink2_audio_caps (void);
+
+gboolean gst_query_is_decklink2_audio_caps (GstQuery * query);
+
+void gst_query_parse_decklink2_audio_caps (GstQuery * query,
+                                           GstCaps ** caps);
+
+void gst_query_set_decklink2_audio_caps (GstQuery * query,
+                                         GstCaps * caps);
 
 #ifndef GST_DISABLE_GST_DEBUG
 static inline gboolean

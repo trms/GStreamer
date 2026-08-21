@@ -383,10 +383,9 @@ struct _GstDeckLink2Input
   gboolean auto_detect;
 
   guint64 next_audio_offset;
-  guint64 audio_offset;
-  GstAdapter *audio_buf;
 
   GstQueueArray *queue;
+  GstVecDeque *audio_queue;
 
   GstDeckLink2DisplayMode selected_mode;
   BMDPixelFormat pixel_format;
@@ -398,7 +397,6 @@ struct _GstDeckLink2Input
   BMDTimecodeFormat timecode_format;
   guint buffer_size;
   gboolean discont;
-  gboolean audio_discont;
   gboolean flushing;
   gboolean started;
   GstClockTime skip_first_time;
@@ -413,6 +411,7 @@ struct _GstDeckLink2Input
   TimeMapping current_time_mapping;
   TimeMapping next_time_mapping;
   gboolean next_time_mapping_pending;
+  gboolean have_time_mapping;
 
   GstClockTime times[256];
 
@@ -458,12 +457,14 @@ gst_decklink2_input_init (GstDeckLink2Input * self)
 {
   self->format_table = g_array_new (FALSE,
       FALSE, sizeof (GstDeckLink2DisplayMode));
-  self->audio_buf = gst_adapter_new ();
   self->allocator = new IGstDeckLinkMemoryAllocator ();
   self->queue = gst_queue_array_new_for_struct (sizeof (GstDecklink2InputData),
       6);
   gst_queue_array_set_clear_func (self->queue,
       (GDestroyNotify) gst_decklink2_input_data_clear);
+  self->audio_queue = gst_vec_deque_new (6);
+  gst_vec_deque_set_clear_func (self->audio_queue,
+      (GDestroyNotify) gst_sample_unref);
   self->priv = new GstDeckLink2InputPrivate ();
 }
 
@@ -476,8 +477,8 @@ gst_decklink2_input_dispose (GObject * object)
   gst_clear_caps (&self->selected_video_caps);
   gst_clear_caps (&self->selected_audio_caps);
   g_clear_pointer (&self->vbi_parser, gst_video_vbi_parser_free);
-  g_clear_object (&self->audio_buf);
   g_clear_pointer (&self->queue, gst_queue_array_free);
+  g_clear_pointer (&self->audio_queue, gst_vec_deque_free);
 
   G_OBJECT_CLASS (parent_class)->dispose (object);
 }
@@ -1070,6 +1071,8 @@ gst_decklink2_input_reset_time_mapping (GstDeckLink2Input * self)
   self->next_time_mapping.b = 0;
   self->next_time_mapping.num = 1;
   self->next_time_mapping.den = 1;
+  self->next_time_mapping_pending = FALSE;
+  self->have_time_mapping = FALSE;
 }
 
 static inline gboolean
@@ -1165,8 +1168,7 @@ gst_decklink2_input_on_format_changed (GstDeckLink2Input * self,
   gst_video_info_from_caps (&self->video_info, self->selected_video_caps);
   self->aspect_ratio_flag = -1;
   self->discont = TRUE;
-  gst_adapter_clear (self->audio_buf);
-  self->audio_offset = INVALID_AUDIO_OFFSET;
+  gst_vec_deque_clear (self->audio_queue);
   self->next_audio_offset = INVALID_AUDIO_OFFSET;
   self->av_sync = 0;
   priv->was_restarted = true;
@@ -1426,6 +1428,8 @@ static void
 gst_decklink2_input_update_time_mapping (GstDeckLink2Input * self,
     GstClockTime capture_time, GstClockTime stream_time)
 {
+  self->have_time_mapping = TRUE;
+
   if (self->window_skip_count == 0) {
     GstClockTime num, den, b, xbase;
     gdouble r_squared;
@@ -1550,9 +1554,8 @@ gst_decklink2_input_do_restart (GstDeckLink2Input * self)
   priv->lock.lock ();
 
   gst_decklink2_input_reset_time_mapping (self);
-  gst_adapter_clear (self->audio_buf);
+  gst_vec_deque_clear (self->audio_queue);
   gst_queue_array_clear (self->queue);
-  self->audio_offset = INVALID_AUDIO_OFFSET;
   self->next_audio_offset = INVALID_AUDIO_OFFSET;
 }
 
@@ -1596,8 +1599,10 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
       } else if (!priv->signal) {
         GST_LOG_OBJECT (self, "Got first frame, reset timing map");
         priv->signal = true;
-        gst_decklink2_input_do_restart (self);
-        return;
+        gst_decklink2_input_reset_time_mapping (self);
+        gst_vec_deque_clear (self->audio_queue);
+        gst_queue_array_clear (self->queue);
+        self->next_audio_offset = INVALID_AUDIO_OFFSET;
       } else {
         priv->signal = true;
       }
@@ -1656,7 +1661,6 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     BMDTimeValue frame_time, frame_dur;
     IDeckLinkTimecode *timecode = NULL;
     GstClockTime pts, dur;
-    BMDPixelFormat pixel_format;
 
     hr = frame->GetBytes (&frame_data);
     if (!gst_decklink2_result (hr)) {
@@ -1664,28 +1668,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
       return;
     }
 
-    pixel_format = frame->GetPixelFormat ();
-    if (pixel_format != self->pixel_format) {
-
-      GST_DEBUG_OBJECT (self, "Unexpected pixel format change %d -> %d",
-          self->pixel_format, pixel_format);
-
-      gst_decklink2_input_do_restart (self);
-      return;
-    }
-
-    auto frame_width = frame->GetWidth ();
     auto frame_height = frame->GetHeight ();
-    if (self->video_info.width != (gint) frame_width ||
-        self->video_info.height != (gint) frame_height) {
-
-      GST_WARNING_OBJECT (self, "Unexpected resolution change %dx%d -> %dx%d",
-          self->video_info.width, self->video_info.height,
-          (gint) frame_width, (gint) frame_height);
-
-      gst_decklink2_input_do_restart (self);
-      return;
-    }
 
     frame_size = frame_height * frame->GetRowBytes ();
     buffer = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY,
@@ -1829,13 +1812,10 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     gsize audio_buf_size;
     GstMapInfo map;
 
-    if (self->audio_offset == INVALID_AUDIO_OFFSET && !frame) {
-      GST_DEBUG_OBJECT (self, "Drop audio without video frame");
+    if (!self->have_time_mapping) {
+      GST_DEBUG_OBJECT (self,
+          "Dropping audio packet due to missing time mapping");
       goto out;
-    }
-
-    if (!frame) {
-      GST_WARNING_OBJECT (self, "Received audio packet without video frame. This indicates video processing is not fast enough.");
     }
 
     long sample_count = packet->GetSampleFrameCount ();
@@ -1864,7 +1844,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     memcpy (map.data, packet_data, map.size);
     gst_buffer_unmap (audio_buf, &map);
 
-    if (self->audio_offset == INVALID_AUDIO_OFFSET) {
+    {
       GstClockTime audio_pts;
       GstClockTime packet_time_in_gst;
 
@@ -1876,82 +1856,70 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
           self->current_time_mapping.xbase, self->current_time_mapping.b,
           self->current_time_mapping.num, self->current_time_mapping.den);
 
-      /* Back to sample offset */
-      self->audio_offset = gst_util_uint64_scale (audio_pts,
-          self->audio_info.rate, GST_SECOND);
+      GST_BUFFER_DTS (audio_buf) = GST_CLOCK_TIME_NONE;
+      GST_BUFFER_PTS (audio_buf) = audio_pts;
+      GST_BUFFER_DURATION (audio_buf) = gst_util_uint64_scale (sample_count,
+          GST_SECOND, self->audio_info.rate);
+      GST_BUFFER_OFFSET (audio_buf) = audio_offset;
+      GST_BUFFER_OFFSET_END (audio_buf) = audio_offset_end;
 
-      GST_DEBUG_OBJECT (self, "Initial audio offset at %" G_GUINT64_FORMAT
-          " for pts %" GST_TIME_FORMAT ", packet time %" GST_TIME_FORMAT,
-          self->audio_offset, GST_TIME_ARGS (audio_pts),
-          GST_TIME_ARGS (packet_time_in_gst));
     }
 
-    if (self->next_audio_offset == INVALID_AUDIO_OFFSET) {
-      self->next_audio_offset = audio_offset_end;
-    } else if (self->next_audio_offset != audio_offset) {
-      GST_WARNING_OBJECT (self, "Expected offset %" G_GUINT64_FORMAT
+    if (self->next_audio_offset != INVALID_AUDIO_OFFSET) {
+      if (self->next_audio_offset != audio_offset) {
+        GST_WARNING_OBJECT (self, "Expected offset %" G_GUINT64_FORMAT
           ", received %" G_GUINT64_FORMAT, self->next_audio_offset,
           audio_offset);
-      gst_decklink2_input_reset_time_mapping (self);
-      gst_decklink2_input_stop_streams (self);
-      gst_decklink2_input_flush_streams (self);
-      gst_decklink2_input_start_streams (self);
-      gst_adapter_clear (self->audio_buf);
-      self->audio_offset = INVALID_AUDIO_OFFSET;
-      self->next_audio_offset = INVALID_AUDIO_OFFSET;
-      return;
-    } else {
-      GST_LOG_OBJECT (self, "Got expected audio samples");
-      self->next_audio_offset += sample_count;
+        GST_BUFFER_FLAG_SET (audio_buf, GST_BUFFER_FLAG_DISCONT);
+      } else {
+        GST_LOG_OBJECT (self, "Got expected audio samples");
+      }
     }
 
-    if (audio_buf)
-      gst_adapter_push (self->audio_buf, audio_buf);
+    self->next_audio_offset = audio_offset_end;
+    auto sample = gst_sample_new (audio_buf, self->selected_audio_caps, nullptr,
+        nullptr);
+    gst_buffer_unref (audio_buf);
+    gst_vec_deque_push_tail (self->audio_queue, sample);
+
+    /* Avoid too many audio buffers in queue */
+    while (gst_vec_deque_get_length (self->audio_queue) > self->buffer_size + 1) {
+      auto audio_sample =
+          (GstSample *) gst_vec_deque_pop_head (self->audio_queue);
+      auto audio_buf = gst_sample_get_buffer (audio_sample);
+      auto len = gst_vec_deque_get_length (self->audio_queue);
+
+      GST_WARNING_OBJECT (self, "Too large audio queue len: %" G_GSIZE_FORMAT
+          ", dropping audio %" GST_PTR_FORMAT, len, audio_buf);
+
+      gst_sample_unref (audio_sample);
+    }
   }
 
 out:
   if (buffer) {
-    GstSample *sample;
-    gsize audio_size;
     while (gst_queue_array_get_length (self->queue) > self->buffer_size) {
       GstDecklink2InputData *data = (GstDecklink2InputData *)
           gst_queue_array_pop_head_struct (self->queue);
       gst_decklink2_input_data_clear (data);
     }
 
-    audio_size = gst_adapter_available (self->audio_buf);
-    if (audio_size > 0) {
-      GstBuffer *audio_buf = gst_adapter_take_buffer (self->audio_buf,
-          audio_size);
-      guint64 sample_count = audio_size / self->audio_info.bpf;
-
-      GST_BUFFER_DTS (audio_buf) = GST_CLOCK_TIME_NONE;
-      GST_BUFFER_PTS (audio_buf) =
-          gst_util_uint64_scale (self->audio_offset, GST_SECOND,
-          self->audio_info.rate);
-      GST_BUFFER_DURATION (audio_buf) =
-          gst_util_uint64_scale (sample_count, GST_SECOND,
-          self->audio_info.rate);
-      if (self->audio_discont) {
-        GST_BUFFER_FLAG_SET (audio_buf, GST_BUFFER_FLAG_DISCONT);
-        self->audio_discont = FALSE;
-      }
-
-      self->audio_offset += sample_count;
+    bool update_av_sync = true;
+    while (gst_vec_deque_get_length (self->audio_queue) > 0) {
+      auto audio_sample =
+          (GstSample *) gst_vec_deque_pop_head (self->audio_queue);
+      auto audio_buf = gst_sample_get_buffer (audio_sample);
 
       GST_LOG_OBJECT (self, "Adding audio buffer %" GST_PTR_FORMAT, audio_buf);
 
-      sample = gst_sample_new (audio_buf, self->selected_audio_caps, NULL,
-          NULL);
-      gst_buffer_add_decklink2_audio_meta (buffer, sample);
-      gst_sample_unref (sample);
-
-      if (frame && packet) {
+      if (update_av_sync) {
         self->av_sync = GST_CLOCK_DIFF (GST_BUFFER_PTS (buffer),
             GST_BUFFER_PTS (audio_buf));
+        update_av_sync = false;
       }
 
-      gst_buffer_unref (audio_buf);
+      gst_buffer_add_decklink2_audio_meta (buffer, audio_sample);
+      gst_sample_unref (audio_sample);
     }
 
     GST_LOG_OBJECT (self, "Enqueue buffer %" GST_PTR_FORMAT, buffer);
@@ -1980,6 +1948,7 @@ gst_decklink2_input_stop_unlocked (GstDeckLink2Input * self)
   priv->lock.lock ();
   priv->stopping = false;
   gst_queue_array_clear (self->queue);
+  gst_vec_deque_clear (self->audio_queue);
   gst_clear_caps (&self->selected_video_caps);
   gst_clear_caps (&self->selected_audio_caps);
   priv->signal = false;
@@ -2105,9 +2074,7 @@ gst_decklink2_input_start (GstDeckLink2Input * input, GstElement * client,
 
   input->auto_detect = video_config->auto_detect;
   input->aspect_ratio_flag = -1;
-  input->audio_offset = INVALID_AUDIO_OFFSET;
   input->next_audio_offset = INVALID_AUDIO_OFFSET;
-  input->audio_discont = FALSE;
 
   if (input->callback)
     hr = gst_decklink2_input_set_callback (input, input->callback);
@@ -2218,11 +2185,8 @@ gst_decklink2_input_get_data (GstDeckLink2Input * input, GstBuffer ** buf,
     priv->cond.wait (lk);
   }
 
-  if (input->flushing)
+  if (input->flushing || !input->started)
     return GST_FLOW_FLUSHING;
-
-  if (!input->started)
-    return GST_DECKLINK2_INPUT_FLOW_STOPPED;
 
   data = (GstDecklink2InputData *)
       gst_queue_array_pop_head_struct (input->queue);
