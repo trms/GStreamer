@@ -581,6 +581,16 @@ interpolate_time_code_with_framerate (GstCCConverter * self,
   return TRUE;
 }
 
+static void
+reset_counters (GstCCConverter * self)
+{
+  self->input_frames = 0;
+  self->output_frames = 1;
+  gst_video_time_code_clear (&self->current_output_timecode);
+  gst_clear_buffer (&self->previous_buffer);
+  cc_buffer_discard (self->cc_buffer);
+}
+
 static gboolean
 can_take_buffer (GstCCConverter * self,
     const struct cdp_fps_entry *in_fps_entry,
@@ -604,19 +614,31 @@ can_take_buffer (GstCCConverter * self,
   } else {
     /* compute the relative frame count for each */
     if (!gst_util_fraction_multiply (in_fps_entry->fps_d, in_fps_entry->fps_n,
-            self->input_frames, 1, &input_frame_n, &input_frame_d))
+            self->input_frames, 1, &input_frame_n, &input_frame_d)) {
       /* we should never overflow */
-      g_assert_not_reached ();
+      GST_ERROR_OBJECT (self,
+          "overflow calculating input frame ratio. In FPS: %d/%d, input-frame %d",
+          in_fps_entry->fps_n, in_fps_entry->fps_d, self->input_frames);
+      g_warn_if_reached ();
+      reset_counters (self);
+      return FALSE;
+    }
   }
 
-  if (in_fps_entry->fps_n == 0) {
+  if (out_fps_entry->fps_n == 0) {
     output_frame_n = self->output_frames;
     output_frame_d = 1;
   } else {
     if (!gst_util_fraction_multiply (out_fps_entry->fps_d, out_fps_entry->fps_n,
-            self->output_frames, 1, &output_frame_n, &output_frame_d))
+            self->output_frames, 1, &output_frame_n, &output_frame_d)) {
       /* we should never overflow */
-      g_assert_not_reached ();
+      GST_ERROR_OBJECT (self,
+          "overflow calculating output frame ratio. Out FPS: %d/%d, output-frame %d",
+          out_fps_entry->fps_n, out_fps_entry->fps_d, self->output_frames);
+      g_warn_if_reached ();
+      reset_counters (self);
+      return FALSE;
+    }
   }
 
   output_time_cmp = gst_util_fraction_compare (input_frame_n, input_frame_d,
@@ -1594,16 +1616,6 @@ can_generate_output (GstCCConverter * self)
     return TRUE;
 
   return FALSE;
-}
-
-static void
-reset_counters (GstCCConverter * self)
-{
-  self->input_frames = 0;
-  self->output_frames = 1;
-  gst_video_time_code_clear (&self->current_output_timecode);
-  gst_clear_buffer (&self->previous_buffer);
-  cc_buffer_discard (self->cc_buffer);
 }
 
 static GstFlowReturn
