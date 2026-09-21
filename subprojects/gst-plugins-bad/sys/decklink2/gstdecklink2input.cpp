@@ -1401,6 +1401,9 @@ extract_vbi (GstDeckLink2Input * self, GstBuffer * buffer,
   ret = frame->GetAncillaryData (&vanc_frame);
   if (ret != S_OK || !vanc_frame) {
     GST_TRACE_OBJECT (self, "Failed getting VBI data: %d", ret);
+    if (vanc_frame)
+      vanc_frame->Release ();
+
     return;
   }
 
