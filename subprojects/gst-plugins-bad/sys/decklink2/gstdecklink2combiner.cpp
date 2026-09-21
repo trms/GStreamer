@@ -168,7 +168,7 @@ gst_decklink2_combiner_sink_event (GstAggregator * agg,
           fps_d = 1;
         }
 
-        auto latency = gst_util_uint64_scale (GST_SECOND, fps_d, fps_n);
+        auto latency = gst_util_uint64_scale_ceil (GST_SECOND, fps_d, fps_n);
         gst_aggregator_set_latency (agg, latency, GST_CLOCK_TIME_NONE);
         self->timeout_advance = latency;
         self->caps_updated = TRUE;
