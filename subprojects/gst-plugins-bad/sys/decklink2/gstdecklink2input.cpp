@@ -1833,6 +1833,11 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
       gst_buffer_add_reference_timestamp_meta (buffer, caps, frame_time,
           frame_dur);
       gst_caps_unref (caps);
+
+      GST_DEBUG_OBJECT (self, "Hardware timestamp: %" GST_TIME_FORMAT
+          ", hardware reference timestamp: %" GST_TIME_FORMAT,
+          GST_TIME_ARGS (hw_now), GST_TIME_ARGS (frame_time));
+
       if (GST_CLOCK_TIME_IS_VALID (hw_now) && hw_now > frame_time) {
         GstClockTime diff = hw_now - frame_time;
         if (capture_time >= diff)
@@ -1853,6 +1858,10 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
           self->current_time_mapping.num, self->current_time_mapping.den);
       dur = gst_util_uint64_scale (stream_dur,
           self->current_time_mapping.num, self->current_time_mapping.den);
+
+      GST_DEBUG_OBJECT (self, "Video timestamp, original: %" GST_TIME_FORMAT
+          ", calibrated: %" GST_TIME_FORMAT, GST_TIME_ARGS (stream_time),
+          GST_TIME_ARGS (pts));
     } else {
       pts = capture_time;
       dur = GST_CLOCK_TIME_NONE;
@@ -2041,6 +2050,10 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
           packet_time_in_gst,
           self->current_time_mapping.xbase, self->current_time_mapping.b,
           self->current_time_mapping.num, self->current_time_mapping.den);
+
+      GST_DEBUG_OBJECT (self, "Audio timestamp, original: %" GST_TIME_FORMAT
+          ", calibrated: %" GST_TIME_FORMAT,
+          GST_TIME_ARGS (packet_time_in_gst), GST_TIME_ARGS (audio_pts));
 
       GST_BUFFER_DTS (audio_buf) = GST_CLOCK_TIME_NONE;
       GST_BUFFER_PTS (audio_buf) = audio_pts;
