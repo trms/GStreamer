@@ -1387,6 +1387,157 @@ extract_vbi_line (GstDeckLink2Input * self, GstBuffer * buffer,
   }
 }
 
+static gboolean
+extract_vbi_from_packet (GstDeckLink2Input * self, GstBuffer * buffer,
+    IDeckLinkVideoFrameAncillaryPackets * packets)
+{
+  IDeckLinkAncillaryPacketIterator *it = nullptr;
+  HRESULT hr;
+  guint field2_start = 0, field2_end = 0;
+
+  if (self->selected_mode.interlaced) {
+    /* Match the field-2 VANC ranges used by extract_vbi(). */
+    switch (gst_decklink2_get_real_display_mode (self->selected_mode.mode)) {
+      case bmdModeNTSC:
+      case bmdModeNTSC2398:
+        field2_start = 264;
+        field2_end = 284;
+        break;
+      case bmdModePAL:
+        field2_start = 311;
+        field2_end = 335;
+        break;
+      case bmdModeHD1080i50:
+      case bmdModeHD1080i5994:
+      case bmdModeHD1080i6000:
+        field2_start = 561;
+        field2_end = 583;
+        break;
+      default:
+        break;
+    }
+  }
+
+  hr = packets->GetPacketIterator (&it);
+  if (hr != S_OK || !it) {
+    GST_DECKLINK2_CLEAR_COM (it);
+    return FALSE;
+  }
+
+  while (TRUE) {
+    IDeckLinkAncillaryPacket *packet = nullptr;
+    hr = it->Next (&packet);
+    if (hr != S_OK || !packet) {
+      GST_DECKLINK2_CLEAR_COM (packet);
+      if (hr != S_FALSE) {
+        GST_WARNING_OBJECT (self, "Failed to get ancillary packet: 0x%x",
+            (guint) hr);
+      }
+      break;
+    }
+
+    const guint8 *payload = nullptr;
+    guint size = 0;
+    auto did = packet->GetDID ();
+    auto sdid = packet->GetSDID ();
+    auto line = packet->GetLineNumber ();
+    gboolean f2 = field2_start && line >= field2_start && line <= field2_end;
+
+    hr = packet->GetBytes (bmdAncillaryPacketFormatUInt8,
+        (const void **) &payload, &size);
+    if (hr != S_OK || (size && !payload) || size > 255) {
+      GST_WARNING_OBJECT (self,
+          "Invalid ancillary payload, DID %02x SDID %02x size %u: 0x%x",
+          did, sdid, size, (guint) hr);
+      packet->Release ();
+      continue;
+    }
+
+    GST_DEBUG_OBJECT (self,
+        "Found DID %02x SDID %02x size %u on line %u, stream %u",
+        (guint) did, (guint) sdid, size, line, packet->GetDataStreamIndex ());
+
+    if (self->output_vanc) {
+      GstAncillaryMeta *meta = gst_buffer_add_ancillary_meta (buffer);
+
+      if (self->selected_mode.interlaced && field2_start && line > 0) {
+        meta->field = f2 ? GST_ANCILLARY_META_FIELD_INTERLACED_SECOND :
+            GST_ANCILLARY_META_FIELD_INTERLACED_FIRST;
+      }
+
+      meta->line = line > 0 && line < 0x7fe ? line : 0x7ff;
+      meta->offset = 0xfff;
+      meta->DID = with_parity (did);
+      meta->SDID_block_number = with_parity (sdid);
+      meta->data_count = with_parity ((guint8) size);
+      meta->data = g_new (guint16, size);
+
+      guint checksum = meta->DID + meta->SDID_block_number + meta->data_count;
+      for (guint i = 0; i < size; i++) {
+        meta->data[i] = with_parity (payload[i]);
+        checksum += meta->data[i];
+      }
+      checksum &= 0x1ff;
+      meta->checksum = checksum | ((!(checksum >> 8)) << 9);
+    }
+
+    switch ((did << 8) | sdid) {
+      case GST_VIDEO_ANCILLARY_DID16_S334_EIA_708:
+        if (self->output_cc && size > 0) {
+          GST_DEBUG_OBJECT (self, "Adding CEA-708 CDP meta to buffer");
+          GST_MEMDUMP_OBJECT (self, "CDP", payload, size);
+          gst_buffer_add_video_caption_meta (buffer,
+              GST_VIDEO_CAPTION_TYPE_CEA708_CDP, payload, size);
+        }
+        break;
+      case GST_VIDEO_ANCILLARY_DID16_S334_EIA_608:
+        if (self->output_cc && size > 0) {
+          GST_DEBUG_OBJECT (self, "Adding CEA-608 meta to buffer");
+          GST_MEMDUMP_OBJECT (self, "CEA608", payload, size);
+          gst_buffer_add_video_caption_meta (buffer,
+              GST_VIDEO_CAPTION_TYPE_CEA608_S334_1A, payload, size);
+        }
+        break;
+      case GST_VIDEO_ANCILLARY_DID16_S2016_3_AFD_BAR:{
+        if (self->output_afd_bar) {
+          GstVideoAFDValue afd;
+          gboolean is_letterbox;
+          guint16 bar1, bar2;
+
+          GST_DEBUG_OBJECT (self, "Adding AFD/Bar meta to buffer");
+          GST_MEMDUMP_OBJECT (self, "AFD/Bar", payload, size);
+
+          if (size < 8) {
+            GST_WARNING_OBJECT (self, "AFD/Bar data too small");
+            break;
+          }
+
+          self->aspect_ratio_flag = (payload[0] >> 2) & 0x1;
+
+          afd = (GstVideoAFDValue) ((payload[0] >> 3) & 0xf);
+          is_letterbox = ((payload[3] >> 4) & 0x3) == 0;
+          bar1 = GST_READ_UINT16_BE (&payload[4]);
+          bar2 = GST_READ_UINT16_BE (&payload[6]);
+
+          gst_buffer_add_video_afd_meta (buffer, f2 ? 1 : 0,
+              GST_VIDEO_AFD_SPEC_SMPTE_ST2016_1, afd);
+          gst_buffer_add_video_bar_meta (buffer, f2 ? 1 : 0,
+              is_letterbox, bar1, bar2);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+
+    packet->Release ();
+  }
+
+  it->Release ();
+
+  return TRUE;
+}
+
 static void
 extract_vbi (GstDeckLink2Input * self, GstBuffer * buffer,
     IDeckLinkVideoInputFrame * frame)
@@ -1871,7 +2022,16 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
       GST_BUFFER_FLAG_SET (buffer, GST_BUFFER_FLAG_GAP);
     } else {
       if (self->output_cc || self->output_afd_bar || self->output_vanc) {
-        extract_vbi (self, buffer, frame);
+        IDeckLinkVideoFrameAncillaryPackets *packets = nullptr;
+        hr = frame->QueryInterface (IID_IDeckLinkVideoFrameAncillaryPackets,
+            (void **) &packets);
+        gboolean used_packet_api = FALSE;
+        if (hr == S_OK && packets)
+          used_packet_api = extract_vbi_from_packet (self, buffer, packets);
+        GST_DECKLINK2_CLEAR_COM (packets);
+
+        if (!used_packet_api)
+          extract_vbi (self, buffer, frame);
 
         if (self->aspect_ratio_flag != -1 && self->auto_detect) {
           BMDDisplayMode mode = self->selected_mode.mode;
