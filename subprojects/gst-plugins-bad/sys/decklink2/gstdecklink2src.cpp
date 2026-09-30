@@ -93,6 +93,7 @@ struct GstDeckLink2SrcPrivate
   GstCaps *selected_caps = nullptr;
   gboolean is_gap_buf = FALSE;
 
+  GstDeckLink2InputStats stats = { };
   gboolean input_started = FALSE;
   std::atomic<gboolean> need_restart = { FALSE };
 
@@ -217,6 +218,7 @@ gst_decklink2_src_init (GstDeckLink2Src * self)
   auto priv = (GstDeckLink2SrcPrivate *)
       gst_decklink2_src_get_instance_private (self);
   self->priv = new (priv) GstDeckLink2SrcPrivate ();
+  gst_decklink2_input_stats_init (&priv->stats);
 
   gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
   gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
@@ -376,6 +378,37 @@ gst_decklink2_src_get_property (GObject * object, guint prop_id, GValue * value,
     case PROP_DESYNC_THRESHOLD:
       g_value_set_uint64 (value, priv->desync_threshold);
       break;
+    case PROP_INPUT_STATS:
+    {
+      const auto & stats = priv->stats;
+      const auto & c = stats.calibration;
+      auto calibration = gst_structure_new ("calibration-stats",
+          "have-mapping", G_TYPE_BOOLEAN, c.have_mapping,
+          "window-filled", G_TYPE_BOOLEAN, c.window_filled,
+          "generation", G_TYPE_UINT64, c.generation,
+          "slope", G_TYPE_DOUBLE, c.slope,
+          "xbase", G_TYPE_UINT64, c.xbase,
+          "b", G_TYPE_UINT64, c.b,
+          "num", G_TYPE_UINT64, c.num,
+          "den", G_TYPE_UINT64, c.den,
+          "r-squared", G_TYPE_DOUBLE, c.r_squared,
+          "diff", G_TYPE_INT64, c.diff, NULL);
+      auto s = gst_structure_new ("input-stats",
+          "stream-time", G_TYPE_UINT64, stats.stream_time,
+          "hardware-time", G_TYPE_UINT64, stats.hardware_time,
+          "hardware-reference-time", G_TYPE_UINT64,
+          stats.hardware_reference_time,
+          "capture-time", G_TYPE_UINT64, stats.capture_time,
+          "calibrated-time", G_TYPE_UINT64, stats.calibrated_time,
+          "audio-packet-time", G_TYPE_UINT64, stats.audio_packet_time,
+          "audio-stream-time", G_TYPE_UINT64, stats.audio_stream_time,
+          "calibrated-audio-time", G_TYPE_UINT64, stats.calibrated_audio_time,
+          "av-sync", G_TYPE_INT64, stats.av_sync,
+          "calibration-stats", GST_TYPE_STRUCTURE, calibration, NULL);
+      gst_structure_free (calibration);
+      g_value_take_boxed (value, s);
+      break;
+    }
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -459,6 +492,7 @@ gst_decklink2_src_start (GstBaseSrc * src)
   auto priv = self->priv;
   std::unique_lock < std::mutex > lk (priv->lock);
 
+  gst_decklink2_input_stats_init (&priv->stats);
   priv->input_started = FALSE;
   priv->need_restart = FALSE;
   gst_video_info_init (&priv->video_info);
@@ -488,6 +522,7 @@ gst_decklink2_src_stop_input (GstDeckLink2Src * self)
 
   gst_clear_caps (&priv->selected_caps);
   gst_video_info_init (&priv->video_info);
+  gst_decklink2_input_stats_init (&priv->stats);
   priv->input_started = FALSE;
   priv->is_gap_buf = FALSE;
 }
@@ -588,7 +623,7 @@ gst_decklink2_src_create (GstPushSrc * src, GstBuffer ** buffer)
   GstFlowReturn ret;
   auto priv = self->priv;
   gboolean is_gap_buf = FALSE;
-  GstClockTimeDiff av_sync;
+  GstDeckLink2InputStats stats;
 
   if (priv->need_restart.exchange (FALSE)) {
     std::lock_guard < std::mutex > lk (priv->lock);
@@ -603,7 +638,7 @@ gst_decklink2_src_create (GstPushSrc * src, GstBuffer ** buffer)
   }
 
 retry:
-  ret = gst_decklink2_input_get_data (priv->input, &buf, &caps, &av_sync);
+  ret = gst_decklink2_input_get_data (priv->input, &buf, &caps, &stats);
   if (ret != GST_FLOW_OK)
     return ret;
 
@@ -622,6 +657,7 @@ retry:
   }
 
   priv->lock.lock ();
+  priv->stats = stats;
   if (!priv->selected_caps || !gst_caps_is_equal (caps, priv->selected_caps)) {
     GST_DEBUG_OBJECT (self, "Set updated caps %" GST_PTR_FORMAT, caps);
     gst_caps_replace (&priv->selected_caps, caps);
@@ -662,18 +698,19 @@ retry:
   if (priv->desync_threshold != 0 &&
       GST_CLOCK_TIME_IS_VALID (priv->desync_threshold)) {
     GstClockTime diff;
-    if (av_sync >= 0)
-      diff = av_sync;
+    if (stats.av_sync >= 0)
+      diff = stats.av_sync;
     else
-      diff = -av_sync;
+      diff = -stats.av_sync;
 
     GST_LOG_OBJECT (self, "Current AV sync %" GST_STIME_FORMAT,
-        GST_STIME_ARGS (av_sync));
+        GST_STIME_ARGS (stats.av_sync));
 
     if (diff >= priv->desync_threshold) {
       GST_WARNING_OBJECT (self, "Large AV desync is detected, desync %"
           GST_STIME_FORMAT ", threshold %" GST_TIME_FORMAT,
-          GST_STIME_ARGS (av_sync), GST_TIME_ARGS (priv->desync_threshold));
+          GST_STIME_ARGS (stats.av_sync),
+          GST_TIME_ARGS (priv->desync_threshold));
 
       priv->need_restart = TRUE;
     }
@@ -796,6 +833,11 @@ gst_decklink2_src_install_properties (GObjectClass * object_class)
       g_param_spec_string ("hw-serial-number", "Hardware serial number",
           "The serial number (hardware ID) of the Decklink card",
           NULL, (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
+
+  g_object_class_install_property (object_class, PROP_INPUT_STATS,
+      g_param_spec_boxed ("input-stats", "Input Statistics",
+          "Input timestamp and calibration statistics", GST_TYPE_STRUCTURE,
+          (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
 }
 
 void
