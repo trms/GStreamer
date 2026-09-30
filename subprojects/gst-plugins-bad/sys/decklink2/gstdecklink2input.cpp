@@ -388,10 +388,19 @@ private:
   GstDeckLink2Input *input_;
 };
 
+struct GstDecklink2InputAudioData
+{
+  GstSample *sample;
+  guint64 packet_time;
+  GstClockTime stream_time;
+  GstClockTime calibrated_time;
+};
+
 struct GstDecklink2InputData
 {
   GstBuffer *buffer;
   GstCaps *caps;
+  GstDeckLink2InputStats stats;
 };
 
 struct TimeMapping
@@ -416,6 +425,7 @@ struct GstDeckLink2InputPrivate
     stopping = false;
   }
 
+  GstDeckLink2InputCalibration calibration = { };
   GstDeckLink2InputMetadata frame_metadata = { };
   GstCaps *frame_caps = nullptr;
   bool api_failed = false;
@@ -507,10 +517,41 @@ static HRESULT gst_decklink2_input_set_allocator (GstDeckLink2Input * input,
     IDeckLinkMemoryAllocator * allocator);
 
 static void
+gst_decklink2_input_calibration_init (GstDeckLink2InputCalibration * calibration)
+{
+  *calibration = {};
+  calibration->slope = 1.0;
+  calibration->num = 1;
+  calibration->den = 1;
+  calibration->diff = GST_CLOCK_STIME_NONE;
+}
+
+void
+gst_decklink2_input_stats_init (GstDeckLink2InputStats * stats)
+{
+  *stats = {};
+  stats->stream_time = GST_CLOCK_TIME_NONE;
+  stats->hardware_time = GST_CLOCK_TIME_NONE;
+  stats->hardware_reference_time = GST_CLOCK_TIME_NONE;
+  stats->capture_time = GST_CLOCK_TIME_NONE;
+  stats->calibrated_time = GST_CLOCK_TIME_NONE;
+  stats->audio_packet_time = G_MAXUINT64;
+  stats->audio_stream_time = GST_CLOCK_TIME_NONE;
+  stats->calibrated_audio_time = GST_CLOCK_TIME_NONE;
+  gst_decklink2_input_calibration_init (&stats->calibration);
+}
+
+static void
 gst_decklink2_input_data_clear (GstDecklink2InputData * data)
 {
   gst_clear_buffer (&data->buffer);
   gst_clear_caps (&data->caps);
+}
+
+static void
+gst_decklink2_input_audio_data_clear (GstDecklink2InputAudioData * data)
+{
+  gst_sample_unref (data->sample);
 }
 
 #define gst_decklink2_input_parent_class parent_class
@@ -539,12 +580,14 @@ gst_decklink2_input_init (GstDeckLink2Input * self)
       6);
   gst_vec_deque_set_clear_func (self->queue,
       (GDestroyNotify) gst_decklink2_input_data_clear);
-  self->audio_queue = gst_vec_deque_new (6);
+  self->audio_queue =
+      gst_vec_deque_new_for_struct (sizeof (GstDecklink2InputAudioData), 6);
   gst_vec_deque_set_clear_func (self->audio_queue,
-      (GDestroyNotify) gst_sample_unref);
+      (GDestroyNotify) gst_decklink2_input_audio_data_clear);
   auto priv = (GstDeckLink2InputPrivate *)
       gst_decklink2_input_get_instance_private (self);
   self->priv = new (priv) GstDeckLink2InputPrivate ();
+  gst_decklink2_input_calibration_init (&priv->calibration);
 }
 
 static void
@@ -1157,6 +1200,7 @@ gst_decklink2_input_reset_time_mapping (GstDeckLink2Input * self)
   self->next_time_mapping.den = 1;
   self->next_time_mapping_pending = FALSE;
   self->have_time_mapping = FALSE;
+  gst_decklink2_input_calibration_init (&self->priv->calibration);
 }
 
 static inline gboolean
@@ -1790,6 +1834,7 @@ static void
 gst_decklink2_input_update_time_mapping (GstDeckLink2Input * self,
     GstClockTime capture_time, GstClockTime stream_time)
 {
+  auto & calibration = self->priv->calibration;
   self->have_time_mapping = TRUE;
 
   if (self->window_skip_count == 0) {
@@ -1840,6 +1885,8 @@ gst_decklink2_input_update_time_mapping (GstDeckLink2Input * self,
           G_GUINT64_FORMAT ") + %" G_GUINT64_FORMAT " (%lf)",
           ((gdouble) num) / ((gdouble) den), xbase, b, r_squared);
 
+      calibration.generation++;
+      calibration.r_squared = r_squared;
       self->next_time_mapping.xbase = xbase;
       self->next_time_mapping.b = b;
       self->next_time_mapping.num = num;
@@ -1863,6 +1910,8 @@ gst_decklink2_input_update_time_mapping (GstDeckLink2Input * self,
         gst_clock_adjust_with_calibration (NULL, stream_time,
         self->next_time_mapping.xbase, self->next_time_mapping.b,
         self->next_time_mapping.num, self->next_time_mapping.den);
+
+    calibration.diff = GST_CLOCK_DIFF (expected, new_calculated);
 
     if (new_calculated > expected)
       diff = new_calculated - expected;
@@ -1897,6 +1946,14 @@ gst_decklink2_input_update_time_mapping (GstDeckLink2Input * self,
       self->next_time_mapping_pending = FALSE;
     }
   }
+
+  calibration.have_mapping = self->have_time_mapping;
+  calibration.window_filled = self->window_filled;
+  calibration.xbase = self->current_time_mapping.xbase;
+  calibration.b = self->current_time_mapping.b;
+  calibration.num = self->current_time_mapping.num;
+  calibration.den = self->current_time_mapping.den;
+  calibration.slope = (gdouble) calibration.num / calibration.den;
 }
 
 /* *INDENT-OFF* */
@@ -2121,6 +2178,9 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
   BMDTimeValue stream_time = GST_CLOCK_TIME_NONE;
   BMDTimeValue stream_dur;
   BMDFrameFlags flags = bmdFrameFlagDefault;
+  GstDeckLink2InputStats stats;
+
+  gst_decklink2_input_stats_init (&stats);
 
   std::unique_lock < std::mutex > lk (priv->lock);
   if (priv->stopping) {
@@ -2224,6 +2284,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     hr = frame->GetHardwareReferenceTimestamp (GST_SECOND,
         &frame_time, &frame_dur);
     if (gst_decklink2_result (hr)) {
+      stats.hardware_reference_time = frame_time;
       GstCaps *caps = gst_static_caps_get (&hardware_reference);
       gst_buffer_add_reference_timestamp_meta (buffer, caps, frame_time,
           frame_dur);
@@ -2242,6 +2303,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
 
     hr = frame->GetStreamTime (&stream_time, &stream_dur, GST_SECOND);
     if (gst_decklink2_result (hr)) {
+      stats.stream_time = stream_time;
       GstCaps *caps = gst_static_caps_get (&stream_reference);
       gst_buffer_add_reference_timestamp_meta (buffer, caps, stream_time,
           stream_dur);
@@ -2401,6 +2463,10 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     }
 
     GST_BUFFER_DTS (buffer) = GST_CLOCK_TIME_NONE;
+    stats.hardware_time = hw_now;
+    stats.capture_time = capture_time;
+    stats.calibrated_time = pts;
+    stats.calibration = priv->calibration;
     GST_BUFFER_PTS (buffer) = pts;
     GST_BUFFER_DURATION (buffer) = dur;
   }
@@ -2411,6 +2477,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     BMDTimeValue packet_time;
     guint64 audio_offset, audio_offset_end;
     gsize audio_buf_size;
+    GstDecklink2InputAudioData audio_data;
 
     if (!self->have_time_mapping) {
       GST_DEBUG_OBJECT (self,
@@ -2465,6 +2532,10 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
           ", calibrated: %" GST_TIME_FORMAT,
           GST_TIME_ARGS (packet_time_in_gst), GST_TIME_ARGS (audio_pts));
 
+      audio_data.packet_time = packet_time;
+      audio_data.stream_time = packet_time_in_gst;
+      audio_data.calibrated_time = audio_pts;
+
       GST_BUFFER_DTS (audio_buf) = GST_CLOCK_TIME_NONE;
       GST_BUFFER_PTS (audio_buf) = audio_pts;
       GST_BUFFER_DURATION (audio_buf) = gst_util_uint64_scale (sample_count,
@@ -2489,12 +2560,14 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     auto sample = gst_sample_new (audio_buf, self->selected_audio_caps, nullptr,
         nullptr);
     gst_buffer_unref (audio_buf);
-    gst_vec_deque_push_tail (self->audio_queue, sample);
+    audio_data.sample = sample;
+    gst_vec_deque_push_tail_struct (self->audio_queue, &audio_data);
 
     /* Avoid too many audio buffers in queue */
     while (gst_vec_deque_get_length (self->audio_queue) > self->buffer_size + 1) {
-      auto audio_sample =
-          (GstSample *) gst_vec_deque_pop_head (self->audio_queue);
+      auto audio_data = (GstDecklink2InputAudioData *)
+          gst_vec_deque_pop_head_struct (self->audio_queue);
+      auto audio_sample = audio_data->sample;
       auto audio_buf = gst_sample_get_buffer (audio_sample);
       auto len = gst_vec_deque_get_length (self->audio_queue);
 
@@ -2515,8 +2588,9 @@ out:
 
     bool update_av_sync = true;
     while (gst_vec_deque_get_length (self->audio_queue) > 0) {
-      auto audio_sample =
-          (GstSample *) gst_vec_deque_pop_head (self->audio_queue);
+      auto audio_data = (GstDecklink2InputAudioData *)
+          gst_vec_deque_pop_head_struct (self->audio_queue);
+      auto audio_sample = audio_data->sample;
       auto audio_buf = gst_sample_get_buffer (audio_sample);
 
       GST_LOG_OBJECT (self, "Adding audio buffer %" GST_PTR_FORMAT, audio_buf);
@@ -2524,6 +2598,9 @@ out:
       if (update_av_sync) {
         self->av_sync = GST_CLOCK_DIFF (GST_BUFFER_PTS (buffer),
             GST_BUFFER_PTS (audio_buf));
+        stats.audio_packet_time = audio_data->packet_time;
+        stats.audio_stream_time = audio_data->stream_time;
+        stats.calibrated_audio_time = audio_data->calibrated_time;
         update_av_sync = false;
       }
 
@@ -2534,6 +2611,8 @@ out:
     GST_LOG_OBJECT (self, "Enqueue buffer %" GST_PTR_FORMAT, buffer);
 
     GstDecklink2InputData new_data;
+    stats.av_sync = self->av_sync;
+    new_data.stats = stats;
     new_data.buffer = buffer;
     new_data.caps = gst_decklink2_input_get_frame_caps (self, frame);
     gst_vec_deque_push_tail_struct (self->queue, &new_data);
@@ -2580,6 +2659,7 @@ gst_decklink2_input_stop_unlocked (GstDeckLink2Input * self)
   self->started = FALSE;
   self->av_sync = 0;
   self->discont = TRUE;
+  gst_decklink2_input_calibration_init (&priv->calibration);
 }
 
 HRESULT
@@ -2825,7 +2905,7 @@ gst_decklink2_input_set_flushing (GstDeckLink2Input * input, gboolean flush)
 
 GstFlowReturn
 gst_decklink2_input_get_data (GstDeckLink2Input * input, GstBuffer ** buf,
-    GstCaps ** caps, GstClockTimeDiff * av_sync)
+    GstCaps ** caps, GstDeckLink2InputStats * stats)
 {
   GstDeckLink2InputPrivate *priv = input->priv;
   std::unique_lock < std::mutex > lk (priv->lock);
@@ -2833,7 +2913,7 @@ gst_decklink2_input_get_data (GstDeckLink2Input * input, GstBuffer ** buf,
 
   *buf = nullptr;
   *caps = nullptr;
-  *av_sync = 0;
+  gst_decklink2_input_stats_init (stats);
 
   while (gst_vec_deque_is_empty (input->queue)
       && !input->flushing && input->started && !priv->api_failed) {
@@ -2850,7 +2930,7 @@ gst_decklink2_input_get_data (GstDeckLink2Input * input, GstBuffer ** buf,
       gst_vec_deque_pop_head_struct (input->queue);
   *buf = data->buffer;
   *caps = data->caps;
-  *av_sync = input->av_sync;
+  *stats = data->stats;
 
   return GST_FLOW_OK;
 }

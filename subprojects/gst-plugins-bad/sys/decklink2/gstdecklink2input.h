@@ -48,6 +48,36 @@ typedef struct _GstDeckLink2InputAudioConfig
   GstDeckLink2AudioChannels channels;
 } GstDeckLink2InputAudioConfig;
 
+typedef struct
+{
+  gboolean have_mapping;
+  gboolean window_filled;
+  guint64 generation;
+  gdouble slope;
+  guint64 xbase;
+  guint64 b;
+  guint64 num;
+  guint64 den;
+  gdouble r_squared;
+  GstClockTimeDiff diff;
+} GstDeckLink2InputCalibration;
+
+typedef struct
+{
+  GstClockTime stream_time;
+  GstClockTime hardware_time;
+  GstClockTime hardware_reference_time;
+  GstClockTime capture_time;
+  GstClockTime calibrated_time;
+  guint64 audio_packet_time;
+  GstClockTime audio_stream_time;
+  GstClockTime calibrated_audio_time;
+  GstClockTimeDiff av_sync;
+  GstDeckLink2InputCalibration calibration;
+} GstDeckLink2InputStats;
+
+void               gst_decklink2_input_stats_init (GstDeckLink2InputStats * stats);
+
 GstDeckLink2Input * gst_decklink2_input_new (IDeckLink * device,
                                              GstDeckLink2APILevel api_level);
 
@@ -75,7 +105,7 @@ void                gst_decklink2_input_set_flushing (GstDeckLink2Input * input,
 GstFlowReturn       gst_decklink2_input_get_data (GstDeckLink2Input * input,
                                                   GstBuffer ** buffer,
                                                   GstCaps ** caps,
-                                                  GstClockTimeDiff * av_sync);
+                                                  GstDeckLink2InputStats * stats);
 
 gboolean            gst_decklink2_input_has_signal (GstDeckLink2Input * input);
 
