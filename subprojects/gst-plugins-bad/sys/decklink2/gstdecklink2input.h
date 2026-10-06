@@ -109,4 +109,7 @@ GstFlowReturn       gst_decklink2_input_get_data (GstDeckLink2Input * input,
 
 gboolean            gst_decklink2_input_has_signal (GstDeckLink2Input * input);
 
+void                gst_decklink2_input_set_restart_on_signal_recovery (GstDeckLink2Input * input,
+                                                                        gboolean enabled);
+
 G_END_DECLS

@@ -71,6 +71,7 @@ GST_DEBUG_CATEGORY_STATIC (gst_decklink2_src_debug);
 #define DEFAULT_SKIP_FIRST_TIME     0
 #define DEFAULT_DESYNC_THRESHOLD    0
 #define DEFAULT_DROP_NO_SIGNAL_FRAMES FALSE
+#define DEFAULT_RESTART_ON_SIGNAL_RECOVERY TRUE
 
 enum
 {
@@ -115,6 +116,7 @@ struct GstDeckLink2SrcPrivate
   guint max_buffered_frames = DEFAULT_MAX_BUFFERED_FRAMES;
   GstClockTime skip_first_time = DEFAULT_SKIP_FIRST_TIME;
   GstClockTime desync_threshold = DEFAULT_DESYNC_THRESHOLD;
+  gboolean restart_on_signal_recovery = DEFAULT_RESTART_ON_SIGNAL_RECOVERY;
 };
 /* *INDENT-ON* */
 
@@ -293,6 +295,12 @@ gst_decklink2_src_set_property (GObject * object, guint prop_id,
     case PROP_DROP_NO_SIGNAL_FRAMES:
       priv->drop_no_signal_frames = g_value_get_boolean (value);
       break;
+    case PROP_RESTART_ON_SIGNAL_RECOVERY:
+      priv->restart_on_signal_recovery = g_value_get_boolean (value);
+      if (priv->input)
+        gst_decklink2_input_set_restart_on_signal_recovery (priv->input,
+            priv->restart_on_signal_recovery);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -409,6 +417,9 @@ gst_decklink2_src_get_property (GObject * object, guint prop_id, GValue * value,
       g_value_take_boxed (value, s);
       break;
     }
+    case PROP_RESTART_ON_SIGNAL_RECOVERY:
+      g_value_set_boolean (value, priv->restart_on_signal_recovery);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -601,6 +612,9 @@ gst_decklink2_src_ensure_started (GstDeckLink2Src * self)
   audio_config.sample_type = bmdAudioSampleType32bitInteger;
   audio_config.channels = priv->audio_channels;
 
+  gst_decklink2_input_set_restart_on_signal_recovery (priv->input,
+      priv->restart_on_signal_recovery);
+
   auto hr = gst_decklink2_input_start (priv->input, GST_ELEMENT (self),
       priv->profile_id, priv->max_buffered_frames,
       priv->skip_first_time, &video_config, &audio_config);
@@ -677,8 +691,7 @@ retry:
   }
   gst_clear_caps (&caps);
 
-  if (GST_BUFFER_FLAG_IS_SET (buf, GST_BUFFER_FLAG_GAP))
-    is_gap_buf = TRUE;
+  is_gap_buf = GST_BUFFER_FLAG_IS_SET (buf, GST_BUFFER_FLAG_GAP);
 
   if (is_gap_buf != priv->is_gap_buf) {
     priv->is_gap_buf = is_gap_buf;
@@ -838,6 +851,14 @@ gst_decklink2_src_install_properties (GObjectClass * object_class)
       g_param_spec_boxed ("input-stats", "Input Statistics",
           "Input timestamp and calibration statistics", GST_TYPE_STRUCTURE,
           (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
+
+  g_object_class_install_property (object_class,
+      PROP_RESTART_ON_SIGNAL_RECOVERY,
+      g_param_spec_boolean ("restart-on-signal-recovery",
+          "Restart on Signal Recovery",
+          "Restart the input when the signal is recovered",
+          DEFAULT_RESTART_ON_SIGNAL_RECOVERY,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 }
 
 void
