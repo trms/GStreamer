@@ -429,6 +429,8 @@ struct GstDeckLink2InputPrivate
   GstDeckLink2InputMetadata frame_metadata = { };
   GstCaps *frame_caps = nullptr;
   bool api_failed = false;
+  bool restarting_streams = false;
+  std::atomic < bool >restart_on_signal_recovery = { false };
   bool aspect_ratio_mismatch_warned = false;
 
   std::mutex lock;
@@ -2188,7 +2190,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     return;
   }
 
-  if (priv->api_failed)
+  if (priv->api_failed || priv->restarting_streams)
     return;
 
   if (frame) {
@@ -2215,6 +2217,43 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
         gst_vec_deque_clear (self->audio_queue);
         gst_vec_deque_clear (self->queue);
         self->next_audio_offset = INVALID_AUDIO_OFFSET;
+
+        /* https://www.blackmagicdesign.com/developer/support/faq/desktop-video-developer-support-faqs#
+         * A no-signal -> signal transition might cause an audio/video
+         * stream time offset. Restart streams as recommended by Blackmagic */
+        if (priv->restart_on_signal_recovery) {
+          self->av_sync = 0;
+          self->discont = TRUE;
+          priv->restarting_streams = true;
+          lk.unlock ();
+
+          GST_INFO_OBJECT (self,
+              "Signal recovered, restarting streams with Stop/Flush/Start");
+          hr = gst_decklink2_input_stop_streams (self);
+          if (hr != S_OK) {
+            GST_ERROR_OBJECT (self, "StopStreams failed, hr: 0x%x", (guint) hr);
+          } else if (!priv->stopping) {
+            hr = gst_decklink2_input_flush_streams (self);
+            if (hr != S_OK) {
+              GST_ERROR_OBJECT (self,
+                  "FlushStreams failed, hr: 0x%x", (guint) hr);
+            } else if (!priv->stopping) {
+              hr = gst_decklink2_input_start_streams (self);
+              if (hr != S_OK)
+                GST_ERROR_OBJECT (self, "StartStreams failed, hr: 0x%x",
+                    (guint) hr);
+            }
+          }
+          lk.lock ();
+
+          priv->restarting_streams = false;
+          if (hr != S_OK && !priv->stopping) {
+            priv->api_failed = true;
+            priv->cond.notify_all ();
+          }
+
+          return;
+        }
       } else {
         priv->signal = true;
       }
@@ -2944,4 +2983,11 @@ gst_decklink2_input_has_signal (GstDeckLink2Input * input)
     return TRUE;
 
   return FALSE;
+}
+
+void
+gst_decklink2_input_set_restart_on_signal_recovery (GstDeckLink2Input * input,
+    gboolean enabled)
+{
+  input->priv->restart_on_signal_recovery = enabled;
 }
