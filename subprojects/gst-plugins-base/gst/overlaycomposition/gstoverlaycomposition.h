@@ -17,34 +17,20 @@
  * Boston, MA 02110-1301, USA.
  */
 
+#pragma once
+
 #include <gst/gst.h>
 #include <gst/video/video.h>
-
-#ifndef __GST_OVERLAY_COMPOSITION_H__
-#define __GST_OVERLAY_COMPOSITION_H__
+#include <gst/base/gstbasetransform.h>
 
 G_BEGIN_DECLS
 
 #define GST_TYPE_OVERLAY_COMPOSITION (gst_overlay_composition_get_type())
 G_DECLARE_FINAL_TYPE (GstOverlayComposition, gst_overlay_composition,
-    GST, OVERLAY_COMPOSITION, GstElement)
-
-struct _GstOverlayComposition {
-  GstElement parent;
-
-  GstPad *sinkpad, *srcpad;
-
-  /* state */
-  GstSample *sample;
-  GstSegment segment;
-  GstCaps *caps;
-  GstVideoInfo info;
-  guint window_width, window_height;
-  gboolean attach_compo_to_buffer;
-};
+    GST, OVERLAY_COMPOSITION, GstBaseTransform)
 
 GST_ELEMENT_REGISTER_DECLARE (overlaycomposition);
 
 G_END_DECLS
 
-#endif /* __GST_OVERLAY_COMPOSITION_H__ */
+

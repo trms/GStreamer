@@ -1393,29 +1393,6 @@ unlock_and_return:
 }
 
 static gboolean
-gst_video_aggregator_get_sinkpads_interlace_mode (GstVideoAggregator * vagg,
-    GstVideoAggregatorPad * skip_pad, GstVideoInterlaceMode * mode)
-{
-  GList *walk;
-
-  GST_OBJECT_LOCK (vagg);
-  for (walk = GST_ELEMENT (vagg)->sinkpads; walk; walk = g_list_next (walk)) {
-    GstVideoAggregatorPad *vaggpad = walk->data;
-
-    if (skip_pad && vaggpad == skip_pad)
-      continue;
-    if (vaggpad->info.finfo
-        && GST_VIDEO_INFO_FORMAT (&vaggpad->info) != GST_VIDEO_FORMAT_UNKNOWN) {
-      *mode = GST_VIDEO_INFO_INTERLACE_MODE (&vaggpad->info);
-      GST_OBJECT_UNLOCK (vagg);
-      return TRUE;
-    }
-  }
-  GST_OBJECT_UNLOCK (vagg);
-  return FALSE;
-}
-
-static gboolean
 gst_video_aggregator_pad_sink_setcaps (GstPad * pad, GstObject * parent,
     GstCaps * caps)
 {
@@ -1435,30 +1412,6 @@ gst_video_aggregator_pad_sink_setcaps (GstPad * pad, GstObject * parent,
   }
 
   GST_VIDEO_AGGREGATOR_LOCK (vagg);
-  {
-    GstVideoInterlaceMode pads_mode = GST_VIDEO_INTERLACE_MODE_PROGRESSIVE;
-    gboolean has_mode = FALSE;
-
-    /* get the current output setting or fallback to other pads settings */
-    if (GST_VIDEO_INFO_FORMAT (&vagg->info) != GST_VIDEO_FORMAT_UNKNOWN) {
-      pads_mode = GST_VIDEO_INFO_INTERLACE_MODE (&vagg->info);
-      has_mode = TRUE;
-    } else {
-      has_mode =
-          gst_video_aggregator_get_sinkpads_interlace_mode (vagg, vaggpad,
-          &pads_mode);
-    }
-
-    if (has_mode) {
-      if (pads_mode != GST_VIDEO_INFO_INTERLACE_MODE (&info)) {
-        GST_ERROR_OBJECT (pad,
-            "got input caps %" GST_PTR_FORMAT ", but current caps are %"
-            GST_PTR_FORMAT, caps, vagg->priv->current_caps);
-        GST_VIDEO_AGGREGATOR_UNLOCK (vagg);
-        return FALSE;
-      }
-    }
-  }
 
   if (!vaggpad->info.finfo ||
       GST_VIDEO_INFO_FORMAT (&vaggpad->info) == GST_VIDEO_FORMAT_UNKNOWN) {
@@ -1484,116 +1437,6 @@ beach:
   return ret;
 }
 
-static gboolean
-gst_video_aggregator_caps_has_alpha (GstCaps * caps)
-{
-  guint size = gst_caps_get_size (caps);
-  guint i;
-
-  for (i = 0; i < size; i++) {
-    GstStructure *s = gst_caps_get_structure (caps, i);
-    const GValue *formats = gst_structure_get_value (s, "format");
-
-    if (formats) {
-      const GstVideoFormatInfo *info;
-
-      if (GST_VALUE_HOLDS_LIST (formats)) {
-        guint list_size = gst_value_list_get_size (formats);
-        guint index;
-
-        for (index = 0; index < list_size; index++) {
-          const GValue *list_item = gst_value_list_get_value (formats, index);
-          info =
-              gst_video_format_get_info (gst_video_format_from_string
-              (g_value_get_string (list_item)));
-          if (GST_VIDEO_FORMAT_INFO_HAS_ALPHA (info))
-            return TRUE;
-        }
-
-      } else if (G_VALUE_HOLDS_STRING (formats)) {
-        info =
-            gst_video_format_get_info (gst_video_format_from_string
-            (g_value_get_string (formats)));
-        if (GST_VIDEO_FORMAT_INFO_HAS_ALPHA (info))
-          return TRUE;
-
-      } else {
-        g_assert_not_reached ();
-        GST_WARNING ("Unexpected type for video 'format' field: %s",
-            G_VALUE_TYPE_NAME (formats));
-      }
-
-    } else {
-      return TRUE;
-    }
-  }
-  return FALSE;
-}
-
-static GstCaps *
-_get_non_alpha_caps (GstCaps * caps)
-{
-  GstCaps *result;
-  guint i, size;
-
-  size = gst_caps_get_size (caps);
-  result = gst_caps_new_empty ();
-  for (i = 0; i < size; i++) {
-    GstStructure *s = gst_caps_get_structure (caps, i);
-    const GValue *formats = gst_structure_get_value (s, "format");
-    GValue new_formats = { 0, };
-    gboolean has_format = FALSE;
-
-    /* FIXME what to do if formats are missing? */
-    if (formats) {
-      const GstVideoFormatInfo *info;
-
-      if (GST_VALUE_HOLDS_LIST (formats)) {
-        guint list_size = gst_value_list_get_size (formats);
-        guint index;
-
-        g_value_init (&new_formats, GST_TYPE_LIST);
-
-        for (index = 0; index < list_size; index++) {
-          const GValue *list_item = gst_value_list_get_value (formats, index);
-
-          info =
-              gst_video_format_get_info (gst_video_format_from_string
-              (g_value_get_string (list_item)));
-          if (!GST_VIDEO_FORMAT_INFO_HAS_ALPHA (info)) {
-            has_format = TRUE;
-            gst_value_list_append_value (&new_formats, list_item);
-          }
-        }
-
-      } else if (G_VALUE_HOLDS_STRING (formats)) {
-        info =
-            gst_video_format_get_info (gst_video_format_from_string
-            (g_value_get_string (formats)));
-        if (!GST_VIDEO_FORMAT_INFO_HAS_ALPHA (info)) {
-          has_format = TRUE;
-          gst_value_init_and_copy (&new_formats, formats);
-        }
-
-      } else {
-        g_assert_not_reached ();
-        GST_WARNING ("Unexpected type for video 'format' field: %s",
-            G_VALUE_TYPE_NAME (formats));
-      }
-
-      if (has_format) {
-        s = gst_structure_copy (s);
-        gst_structure_take_value_static_str (s, "format", &new_formats);
-        gst_caps_append_structure_full (result, s,
-            gst_caps_features_copy (gst_caps_get_features (caps, i)));
-      }
-
-    }
-  }
-
-  return result;
-}
-
 static GstCaps *
 gst_video_aggregator_pad_sink_getcaps (GstPad * pad, GstVideoAggregator * vagg,
     GstCaps * filter)
@@ -1605,9 +1448,6 @@ gst_video_aggregator_pad_sink_getcaps (GstPad * pad, GstVideoAggregator * vagg,
   gint i, n;
   GstAggregator *agg = GST_AGGREGATOR (vagg);
   GstPad *srcpad = GST_PAD (agg->srcpad);
-  gboolean has_alpha;
-  GstVideoInterlaceMode interlace_mode;
-  gboolean has_interlace_mode;
 
   template_caps = gst_pad_get_pad_template_caps (srcpad);
 
@@ -1615,11 +1455,6 @@ gst_video_aggregator_pad_sink_getcaps (GstPad * pad, GstVideoAggregator * vagg,
 
   srccaps = gst_pad_peer_query_caps (srcpad, template_caps);
   srccaps = gst_caps_make_writable (srccaps);
-  has_alpha = gst_video_aggregator_caps_has_alpha (srccaps);
-
-  has_interlace_mode =
-      gst_video_aggregator_get_sinkpads_interlace_mode (vagg, NULL,
-      &interlace_mode);
 
   n = gst_caps_get_size (srccaps);
   for (i = 0; i < n; i++) {
@@ -1634,9 +1469,7 @@ gst_video_aggregator_pad_sink_getcaps (GstPad * pad, GstVideoAggregator * vagg,
           "pixel-aspect-ratio", NULL);
     }
 
-    if (has_interlace_mode)
-      gst_structure_set_static_str (s, "interlace-mode", G_TYPE_STRING,
-          gst_video_interlace_mode_to_string (interlace_mode), NULL);
+    gst_structure_remove_fields (s, "interlace-mode", NULL);
   }
 
   if (filter) {
@@ -1647,11 +1480,6 @@ gst_video_aggregator_pad_sink_getcaps (GstPad * pad, GstVideoAggregator * vagg,
   }
 
   sink_template_caps = gst_pad_get_pad_template_caps (pad);
-  if (!has_alpha) {
-    GstCaps *tmp = _get_non_alpha_caps (sink_template_caps);
-    gst_caps_unref (sink_template_caps);
-    sink_template_caps = tmp;
-  }
 
   {
     GstCaps *intersect = gst_caps_intersect (returned_caps, sink_template_caps);
@@ -2979,6 +2807,8 @@ gst_video_aggregator_pad_sink_acceptcaps (GstPad * pad,
       gst_structure_remove_fields (s, "colorimetry", "chroma-site", "format",
           "pixel-aspect-ratio", NULL);
     }
+
+    gst_structure_remove_fields (s, "interlace-mode", NULL);
   }
 
   ret = gst_caps_can_intersect (caps, accepted_caps);

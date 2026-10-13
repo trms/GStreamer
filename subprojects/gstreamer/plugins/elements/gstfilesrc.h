@@ -28,6 +28,7 @@
 
 #include <gst/gst.h>
 #include <gst/base/gstbasesrc.h>
+#include <stdio.h>
 
 G_BEGIN_DECLS
 
@@ -57,12 +58,14 @@ struct _GstFileSrc {
   /*< private >*/
   gchar *filename;			/* filename */
   gchar *uri;				/* caching the URI */
-  gint fd;				/* open file descriptor */
-  guint64 read_position;		/* position of fd */
+  FILE *fp;
+  guint64 read_position;		/* position of file stream */
 
   gboolean seekable;                    /* whether the file is seekable */
   gboolean is_regular;                  /* whether it's a (symlink to a)
                                            regular file */
+  gsize buffer_size;
+  guint8 *buffer;
 };
 
 struct _GstFileSrcClass {
