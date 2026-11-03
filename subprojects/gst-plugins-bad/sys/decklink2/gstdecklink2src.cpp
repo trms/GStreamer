@@ -72,6 +72,7 @@ GST_DEBUG_CATEGORY_STATIC (gst_decklink2_src_debug);
 #define DEFAULT_DESYNC_THRESHOLD    0
 #define DEFAULT_DROP_NO_SIGNAL_FRAMES FALSE
 #define DEFAULT_RESTART_ON_SIGNAL_RECOVERY TRUE
+#define DEFAULT_AUDIO_TIMESTAMP_MODE GST_DECKLINK2_AUDIO_TIMESTAMP_MODE_PACKET
 
 enum
 {
@@ -117,6 +118,8 @@ struct GstDeckLink2SrcPrivate
   GstClockTime skip_first_time = DEFAULT_SKIP_FIRST_TIME;
   GstClockTime desync_threshold = DEFAULT_DESYNC_THRESHOLD;
   gboolean restart_on_signal_recovery = DEFAULT_RESTART_ON_SIGNAL_RECOVERY;
+  GstDeckLink2AudioTimestampMode audio_timestamp_mode =
+      DEFAULT_AUDIO_TIMESTAMP_MODE;
 };
 /* *INDENT-ON* */
 
@@ -212,6 +215,8 @@ gst_decklink2_src_class_init (GstDeckLink2SrcClass * klass)
       (GstPluginAPIFlags) 0);
   gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK2_TIMECODE_FORMAT,
       (GstPluginAPIFlags) 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK2_AUDIO_TIMESTAMP_MODE,
+      (GstPluginAPIFlags) 0);
 }
 
 static void
@@ -300,6 +305,13 @@ gst_decklink2_src_set_property (GObject * object, guint prop_id,
       if (priv->input)
         gst_decklink2_input_set_restart_on_signal_recovery (priv->input,
             priv->restart_on_signal_recovery);
+      break;
+    case PROP_AUDIO_TIMESTAMP_MODE:
+      priv->audio_timestamp_mode =
+          (GstDeckLink2AudioTimestampMode) g_value_get_enum (value);
+      if (priv->input)
+        gst_decklink2_input_set_audio_timestamp_mode (priv->input,
+            priv->audio_timestamp_mode);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -419,6 +431,9 @@ gst_decklink2_src_get_property (GObject * object, guint prop_id, GValue * value,
     }
     case PROP_RESTART_ON_SIGNAL_RECOVERY:
       g_value_set_boolean (value, priv->restart_on_signal_recovery);
+      break;
+    case PROP_AUDIO_TIMESTAMP_MODE:
+      g_value_set_enum (value, priv->audio_timestamp_mode);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -614,6 +629,8 @@ gst_decklink2_src_ensure_started (GstDeckLink2Src * self)
 
   gst_decklink2_input_set_restart_on_signal_recovery (priv->input,
       priv->restart_on_signal_recovery);
+  gst_decklink2_input_set_audio_timestamp_mode (priv->input,
+      priv->audio_timestamp_mode);
 
   auto hr = gst_decklink2_input_start (priv->input, GST_ELEMENT (self),
       priv->profile_id, priv->max_buffered_frames,
@@ -858,6 +875,22 @@ gst_decklink2_src_install_properties (GObjectClass * object_class)
           "Restart on Signal Recovery",
           "Restart the input when the signal is recovered",
           DEFAULT_RESTART_ON_SIGNAL_RECOVERY,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  /**
+   * GstDeckLink2Src:audio-timestamp-mode:
+   *
+   * How audio buffers are timestamped. "packet" (default) converts the audio
+   * packet's sample counter through the same time mapping as video. "frame"
+   * stamps each audio packet with the PTS of the video frame it was delivered
+   * with, which keeps A/V locked when the source's embedded audio is not
+   * clock-locked to its video.
+   */
+  g_object_class_install_property (object_class, PROP_AUDIO_TIMESTAMP_MODE,
+      g_param_spec_enum ("audio-timestamp-mode", "Audio Timestamp Mode",
+          "How audio buffers are timestamped",
+          GST_TYPE_DECKLINK2_AUDIO_TIMESTAMP_MODE,
+          DEFAULT_AUDIO_TIMESTAMP_MODE,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 }
 

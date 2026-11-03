@@ -112,4 +112,7 @@ gboolean            gst_decklink2_input_has_signal (GstDeckLink2Input * input);
 void                gst_decklink2_input_set_restart_on_signal_recovery (GstDeckLink2Input * input,
                                                                         gboolean enabled);
 
+void                gst_decklink2_input_set_audio_timestamp_mode (GstDeckLink2Input * input,
+                                                                  GstDeckLink2AudioTimestampMode mode);
+
 G_END_DECLS
