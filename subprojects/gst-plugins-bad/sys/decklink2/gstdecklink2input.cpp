@@ -431,6 +431,11 @@ struct GstDeckLink2InputPrivate
   bool api_failed = false;
   bool restarting_streams = false;
   std::atomic < bool >restart_on_signal_recovery = { false };
+  std::atomic < GstDeckLink2AudioTimestampMode > audio_timestamp_mode =
+      { GST_DECKLINK2_AUDIO_TIMESTAMP_MODE_PACKET };
+  /* frame mode: expected PTS of the next audio packet, used when a packet
+   * arrives without a video frame */
+  GstClockTime next_frame_mode_audio_pts = GST_CLOCK_TIME_NONE;
   bool aspect_ratio_mismatch_warned = false;
 
   std::mutex lock;
@@ -1347,6 +1352,7 @@ gst_decklink2_input_on_format_changed (GstDeckLink2Input * self,
     self->discont = TRUE;
     gst_vec_deque_clear (self->audio_queue);
     self->next_audio_offset = INVALID_AUDIO_OFFSET;
+    priv->next_frame_mode_audio_pts = GST_CLOCK_TIME_NONE;
     self->av_sync = 0;
     priv->was_restarted = true;
 
@@ -2181,6 +2187,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
   BMDTimeValue stream_dur;
   BMDFrameFlags flags = bmdFrameFlagDefault;
   GstDeckLink2InputStats stats;
+  GstClockTime frame_pts = GST_CLOCK_TIME_NONE;
 
   gst_decklink2_input_stats_init (&stats);
 
@@ -2217,6 +2224,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
         gst_vec_deque_clear (self->audio_queue);
         gst_vec_deque_clear (self->queue);
         self->next_audio_offset = INVALID_AUDIO_OFFSET;
+        priv->next_frame_mode_audio_pts = GST_CLOCK_TIME_NONE;
 
         /* https://www.blackmagicdesign.com/developer/support/faq/desktop-video-developer-support-faqs#
          * A no-signal -> signal transition might cause an audio/video
@@ -2508,6 +2516,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     stats.calibration = priv->calibration;
     GST_BUFFER_PTS (buffer) = pts;
     GST_BUFFER_DURATION (buffer) = dur;
+    frame_pts = pts;
   }
 
   if (packet) {
@@ -2558,18 +2567,42 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
     {
       GstClockTime audio_pts;
       GstClockTime packet_time_in_gst;
+      GstClockTime audio_dur;
 
       packet_time_in_gst = gst_util_uint64_scale (GST_SECOND, packet_time,
           self->audio_info.rate);
+      audio_dur = gst_util_uint64_scale (sample_count, GST_SECOND,
+          self->audio_info.rate);
 
-      audio_pts = gst_clock_adjust_with_calibration (NULL,
-          packet_time_in_gst,
-          self->current_time_mapping.xbase, self->current_time_mapping.b,
-          self->current_time_mapping.num, self->current_time_mapping.den);
+      audio_pts = GST_CLOCK_TIME_NONE;
+      if (priv->audio_timestamp_mode ==
+          GST_DECKLINK2_AUDIO_TIMESTAMP_MODE_FRAME) {
+        /* The audio packet delivered with a video frame covers that frame's
+         * duration. Stamping it with the frame PTS keeps audio locked to video
+         * even when the source's embedded audio clock isn't locked to its
+         * video clock (in which case the packet counter drifts away from the
+         * video stream time and nothing downstream can see it) */
+        if (GST_CLOCK_TIME_IS_VALID (frame_pts))
+          audio_pts = frame_pts;
+        else
+          audio_pts = priv->next_frame_mode_audio_pts;
+
+        if (GST_CLOCK_TIME_IS_VALID (audio_pts))
+          priv->next_frame_mode_audio_pts = audio_pts + audio_dur;
+      }
+
+      /* packet mode, or frame mode without any reference yet */
+      if (!GST_CLOCK_TIME_IS_VALID (audio_pts)) {
+        audio_pts = gst_clock_adjust_with_calibration (NULL,
+            packet_time_in_gst,
+            self->current_time_mapping.xbase, self->current_time_mapping.b,
+            self->current_time_mapping.num, self->current_time_mapping.den);
+      }
 
       GST_DEBUG_OBJECT (self, "Audio timestamp, original: %" GST_TIME_FORMAT
-          ", calibrated: %" GST_TIME_FORMAT,
-          GST_TIME_ARGS (packet_time_in_gst), GST_TIME_ARGS (audio_pts));
+          ", calibrated: %" GST_TIME_FORMAT ", frame pts: %" GST_TIME_FORMAT,
+          GST_TIME_ARGS (packet_time_in_gst), GST_TIME_ARGS (audio_pts),
+          GST_TIME_ARGS (frame_pts));
 
       audio_data.packet_time = packet_time;
       audio_data.stream_time = packet_time_in_gst;
@@ -2577,8 +2610,7 @@ gst_decklink2_input_on_frame_arrived (GstDeckLink2Input * self,
 
       GST_BUFFER_DTS (audio_buf) = GST_CLOCK_TIME_NONE;
       GST_BUFFER_PTS (audio_buf) = audio_pts;
-      GST_BUFFER_DURATION (audio_buf) = gst_util_uint64_scale (sample_count,
-          GST_SECOND, self->audio_info.rate);
+      GST_BUFFER_DURATION (audio_buf) = audio_dur;
       GST_BUFFER_OFFSET (audio_buf) = audio_offset;
       GST_BUFFER_OFFSET_END (audio_buf) = audio_offset_end;
 
@@ -2835,6 +2867,7 @@ gst_decklink2_input_start (GstDeckLink2Input * input, GstElement * client,
   input->auto_detect = video_config->auto_detect;
   input->aspect_ratio_flag = -1;
   input->next_audio_offset = INVALID_AUDIO_OFFSET;
+  input->priv->next_frame_mode_audio_pts = GST_CLOCK_TIME_NONE;
 
   if (input->callback)
     hr = gst_decklink2_input_set_callback (input, input->callback);
@@ -2990,4 +3023,11 @@ gst_decklink2_input_set_restart_on_signal_recovery (GstDeckLink2Input * input,
     gboolean enabled)
 {
   input->priv->restart_on_signal_recovery = enabled;
+}
+
+void
+gst_decklink2_input_set_audio_timestamp_mode (GstDeckLink2Input * input,
+    GstDeckLink2AudioTimestampMode mode)
+{
+  input->priv->audio_timestamp_mode = mode;
 }

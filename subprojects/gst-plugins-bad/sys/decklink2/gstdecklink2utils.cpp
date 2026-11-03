@@ -488,6 +488,26 @@ gst_decklink2_audio_channels_get_type (void)
   return type;
 }
 
+GType
+gst_decklink2_audio_timestamp_mode_get_type (void)
+{
+  static GType type = G_TYPE_INVALID;
+  static const GEnumValue modes[] = {
+    {GST_DECKLINK2_AUDIO_TIMESTAMP_MODE_PACKET,
+        "Timestamp audio from the audio packet time", "packet"},
+    {GST_DECKLINK2_AUDIO_TIMESTAMP_MODE_FRAME,
+        "Timestamp audio with the PTS of the video frame it arrived with",
+        "frame"},
+    {0, NULL, NULL}
+  };
+
+  GST_DECKLINK2_CALL_ONCE_BEGIN {
+    type = g_enum_register_static ("GstDeckLink2AudioTimestampMode", modes);
+  } GST_DECKLINK2_CALL_ONCE_END;
+
+  return type;
+}
+
 #define NTSC 10, 11, FALSE
 #define PAL 12, 11, TRUE
 #define NTSC_WS 40, 33, FALSE

@@ -130,6 +130,14 @@ typedef enum
 #define GST_TYPE_DECKLINK2_AUDIO_CHANNELS (gst_decklink2_audio_channels_get_type ())
 GType gst_decklink2_audio_channels_get_type (void);
 
+typedef enum
+{
+  GST_DECKLINK2_AUDIO_TIMESTAMP_MODE_PACKET,
+  GST_DECKLINK2_AUDIO_TIMESTAMP_MODE_FRAME,
+} GstDeckLink2AudioTimestampMode;
+#define GST_TYPE_DECKLINK2_AUDIO_TIMESTAMP_MODE (gst_decklink2_audio_timestamp_mode_get_type ())
+GType gst_decklink2_audio_timestamp_mode_get_type (void);
+
 struct _GstDeckLink2DisplayMode
 {
   BMDDisplayMode mode;
